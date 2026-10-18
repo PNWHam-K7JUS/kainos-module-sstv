@@ -52,13 +52,15 @@ namespace Kainos.Sstv.UI
         public Bitmap Image;                // not owned
         public string Caption = "";
         public string Placeholder = "";
-        public double Progress = -1;        // while receiving: how far down the picture is (0 - 1)
+        public double Progress = -1;        // while receiving or sending: how far down the picture is (0 - 1)
+        public Color ProgressColor;
 
         public PictureView(IKainosTheme t)
         {
             _t = t;
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
             BackColor = t.Bg;
+            ProgressColor = t.Gold;
         }
 
         protected override void OnHandleCreated(EventArgs e) { base.OnHandleCreated(e); _k = KainosCrispHost.DpiScale(this); }
@@ -99,7 +101,7 @@ namespace Kainos.Sstv.UI
             if (Progress >= 0 && Progress < 1)
             {
                 float y = r.Top + (float)(Progress * r.Height);
-                using (Pen p = new Pen(_t.Gold, Math.Max(1, px(1.5f)))) g.DrawLine(p, r.Left, y, r.Right, y);
+                using (Pen p = new Pen(ProgressColor, Math.Max(1, px(1.5f)))) g.DrawLine(p, r.Left, y, r.Right, y);
             }
             if (!string.IsNullOrEmpty(Caption))
             {

@@ -42,6 +42,7 @@ namespace Kainos.Sstv
             _run = false;
             if (_thread != null && !_thread.Join(1500)) _host.Log("engine thread didn't stop in time");
             _thread = null;
+            endTx(false);
             _host.Audio.ReleaseRx();
             _tapOk = false;
         }
@@ -88,11 +89,16 @@ namespace Kainos.Sstv
                     if (_cut) { _cut = false; Decoder.Cut(); }
                     SstvMode sn = _startNow;
                     if (sn != null) { _startNow = null; Decoder.StartNow(sn); }
+                    float[] pend = _pendingWave;
+                    if (pend != null) { _pendingWave = null; startTx(pend); }
+                    if (Sending) feedTx();
                     if (ensureTap())
                     {
                         int rate = _host.Audio.RxRate, n;
                         while (rate > 0 && (n = _host.Audio.ReadRx(_buf, _buf.Length)) > 0)
                         {
+                            // while sending (and just after) what comes back is our own signal or nothing: not decoded
+                            if (Sending || DateTime.UtcNow < _rxMuteUntil) continue;
                             Decoder.Push(_buf, n, rate);
                             record(_buf, n, rate);
                             spectrum(_buf, n, rate);
@@ -100,8 +106,132 @@ namespace Kainos.Sstv
                     }
                 }
                 catch (Exception ex) { _host.Log("engine: " + ex); Thread.Sleep(200); }
-                Thread.Sleep(20);
+                Thread.Sleep(Sending ? 10 : 20);
             }
+        }
+
+        // ---- transmit ----
+        // As the Digital Modes module does it: the transmit audio feed started, then MOX; about 0.25 s kept queued; stopped
+        // by Halt, by the radio being un-keyed elsewhere (MOX button, foot switch), or if MOX never comes; then the feed
+        // stopped and MOX off.
+
+        public double LevelDb = -10;                // transmit audio level (dB below full scale): set for full power, ALC barely moving
+        public volatile bool Sending;               // a picture (or the tune tone) is going out
+        public volatile bool Tuning;
+        public event Action<double> TxProgress;     // 0 - 1, on the engine's thread
+        public event Action<bool> TxEnded;          // true: sent to the end
+
+        private volatile float[] _pendingWave;
+        private float[] _txWave;
+        private int _txPos, _txRate;
+        private volatile bool _halt;
+        private bool _moxSeen;
+        private DateTime _moxAskedAt, _rxMuteUntil;
+        private const double TxLead = 0.25;         // silence first, for the radio to switch over
+
+        public double TxSecondsLeft { get { float[] w = _txWave; return w == null || _txRate <= 0 ? 0 : (w.Length - _txPos) / (double)_txRate; } }
+
+        // the audio for a picture in a mode, with the FSK ID callsign after it (null: none), at the transmit level
+        public float[] BuildTx(System.Drawing.Bitmap picture, SstvMode m, string fskId)
+        {
+            int rate = _host.Audio.TxRate;
+            if (rate <= 0) rate = 48000;
+            float[] a = SstvEncoder.Audio(SstvEncoder.Tones(m, SstvEncoder.Pixels(picture, m), fskId), rate);
+            return shape(a, rate);
+        }
+
+        private float[] shape(float[] a, int rate)
+        {
+            float amp = (float)Math.Pow(10, LevelDb / 20.0);
+            int lead = (int)(TxLead * rate), ramp = rate / 200;      // 5 ms ramps: no clicks
+            float[] o = new float[lead + a.Length];
+            for (int i = 0; i < a.Length; i++)
+            {
+                double env = i < ramp ? i / (double)ramp : i > a.Length - ramp ? (a.Length - i) / (double)ramp : 1;
+                o[lead + i] = (float)(a[i] * amp * env);
+            }
+            return o;
+        }
+
+        // sends audio from BuildTx; returns why not, or null
+        public string Send(float[] wave)
+        {
+            if (!_host.Radio.PowerOn) return "The radio is off";
+            if (Sending) return "Already sending";
+            if (_thread == null) return "SSTV isn't open";
+            _txRate = _host.Audio.TxRate;
+            _pendingWave = wave;
+            return null;
+        }
+
+        // a steady 1900 Hz tone (up to 30 s) to set the transmit level and drive
+        public string Tune()
+        {
+            int rate = _host.Audio.TxRate;
+            if (rate <= 0) return "No transmit audio stream";
+            float[] t = new float[rate * 30];
+            double step = 2 * Math.PI * 1900 / rate;
+            for (int i = 0; i < t.Length; i++) t[i] = (float)Math.Sin(step * i);
+            string why = Send(shape(t, rate));
+            if (why == null) Tuning = true;
+            return why;
+        }
+
+        public void Halt() { _halt = true; _pendingWave = null; }
+
+        private void startTx(float[] wave)
+        {
+            if (!_host.Radio.PowerOn) { Status?.Invoke("The radio is off"); return; }
+            if (Decoder.Receiving) Decoder.Cut();
+            _txWave = wave;
+            _txPos = 0;
+            _txRate = _host.Audio.TxRate;
+            _halt = false;
+            _moxSeen = false;
+            _moxAskedAt = DateTime.UtcNow;
+            Sending = true;
+            _host.Audio.TxStart();
+            _host.BeginInvoke(() => _host.Radio.SetMox(true));
+            _host.Log((Tuning ? "tune" : "TX") + " " + (wave.Length / (double)Math.Max(1, _txRate)).ToString("0.0") + " s at " + LevelDb.ToString("0") + " dB");
+            feedTx();
+        }
+
+        private void feedTx()
+        {
+            if (!Sending || _txWave == null) return;
+            bool keyed = _host.Radio.Transmitting;
+            if (keyed) _moxSeen = true;
+            if (_halt || (_moxSeen && !keyed) || (!_moxSeen && (DateTime.UtcNow - _moxAskedAt).TotalSeconds > 2))
+            {
+                if (!_moxSeen && !_halt) Status?.Invoke("The radio didn't go into transmit");
+                else if (!_halt) Status?.Invoke("Transmit stopped: the radio was un-keyed");
+                endTx(false);
+                return;
+            }
+            int ahead = Math.Max(2048, _txRate / 4);
+            while (_txPos < _txWave.Length && _host.Audio.TxQueued < ahead)
+            {
+                int n = Math.Min(4096, _txWave.Length - _txPos);
+                float[] part = new float[n];
+                Array.Copy(_txWave, _txPos, part, 0, n);
+                int w = _host.Audio.TxWrite(part, n);
+                _txPos += w;
+                if (w < n) break;
+            }
+            TxProgress?.Invoke(_txPos / (double)_txWave.Length);
+            if (_txPos >= _txWave.Length && _host.Audio.TxQueued == 0) endTx(true);
+        }
+
+        private void endTx(bool done)
+        {
+            if (!Sending) return;
+            Sending = false;
+            Tuning = false;
+            _host.Audio.TxStop();
+            _host.BeginInvoke(() => _host.Radio.SetMox(false));
+            _txWave = null;
+            _rxMuteUntil = DateTime.UtcNow.AddSeconds(1);
+            TxEnded?.Invoke(done);
         }
 
         // ---- the last 3 minutes of audio, to save for a look at what was heard ----

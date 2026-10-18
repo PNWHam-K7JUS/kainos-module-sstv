@@ -12,13 +12,14 @@ using System.Diagnostics;
 using System.Drawing;
 using System.Globalization;
 using System.IO;
+using System.Linq;
 using System.Text.RegularExpressions;
 using System.Windows.Forms;
 using Kainos.Modules;
 
 namespace Kainos.Sstv.UI
 {
-    internal class SstvPane : Panel
+    internal partial class SstvPane : Panel
     {
         private readonly IKainosHost _host;
         private readonly IKainosTheme _t;
@@ -92,6 +93,7 @@ namespace Kainos.Sstv.UI
             _gallery = new GalleryStrip(_t);
             Controls.Add(_gallery);
 
+            buildSendBar();
             wire();
             _e.Rx = host.GetSetting("rx", "0") == "1" ? 1 : 0;
             _rxSel.Text = "RX" + (_e.Rx + 1);
@@ -112,6 +114,7 @@ namespace Kainos.Sstv.UI
                 _timer.Stop(); _timer.Dispose();
                 if (_live != null) _live.Dispose();
                 if (_saved != null) _saved.Dispose();
+                if (_pvBitmap != null) _pvBitmap.Dispose();
             }
             base.Dispose(disposing);
         }
@@ -131,6 +134,8 @@ namespace Kainos.Sstv.UI
             _pop.SetBounds(right - _t.S(64), y, _t.S(64), bh); right -= _t.S(64) + pad;
             _status.SetBounds(x + pad, y, Math.Max(0, right - x - pad), bh);
 
+            y += bh + pad;
+            layoutSendBar(y, bh);
             y += bh + pad;
             int galH = Math.Max(_t.S(64), Math.Min(_t.S(112), (Height - y) * 22 / 100));
             int detW = _t.S(230);
@@ -159,7 +164,13 @@ namespace Kainos.Sstv.UI
             _openFolder.Click += (s, e) => openFolder();
             _pop.Click += (s, e) => PopToggled?.Invoke();
             _options.Click += (s, e) => optionsMenu().Show(_options, new Point(0, _options.Height));
-            _view.Click += (s, e) => { if (_savedItem != null) showLive(); };
+            // a click on the picture goes back to the live one (from a saved picture, or one shown ready to send)
+            _view.Click += (s, e) =>
+            {
+                if (_e.Sending) return;
+                if (_pvTemplate != null) { clearPreview(); showLive(); }
+                else if (_savedItem != null) showLive();
+            };
             _gallery.Picked += show;
             _gallery.Menu += (it, p) => itemMenu(it).Show(_gallery, p);
 
@@ -241,6 +252,14 @@ namespace Kainos.Sstv.UI
             check("Show the SSTV tones on the panadapter", "markers", "1", "Lines at sync (1200 Hz), black (1500 Hz) and white (2300 Hz) from the VFO, to tune by");
             check("Sharp picture on high-DPI screens", "crisp", "1", "Draw the picture at the screen's own resolution at 125 % / 150 % scaling (takes effect when Kainos restarts)");
             m.Items.Add(new ToolStripSeparator());
+            m.Items.Add(levelMenu());
+            ToolStripMenuItem setup = new ToolStripMenuItem("Station setup...");
+            setup.Click += (s, e) => RunSetup(false);
+            m.Items.Add(setup);
+            ToolStripMenuItem edit = new ToolStripMenuItem("Edit pictures...");
+            edit.Click += (s, e) => EditTemplates();
+            m.Items.Add(edit);
+            m.Items.Add(new ToolStripSeparator());
             ToolStripMenuItem rec = new ToolStripMenuItem("Save the last 3 minutes of audio") { ToolTipText = "A WAV of what the module heard, for checking a signal that didn't decode" };
             rec.Click += (s, e) => saveAudio();
             m.Items.Add(rec);
@@ -290,7 +309,7 @@ namespace Kainos.Sstv.UI
             {
                 _dirty = false;
                 Gallery.CopyInto(_livePic, _live);
-                if (_savedItem == null) { _view.Progress = _livePic.Complete ? -1 : _livePic.LinesDone / (double)_livePic.Mode.Lines; _view.Invalidate(); }
+                if (showingLive) { _view.Progress = _livePic.Complete ? -1 : _livePic.LinesDone / (double)_livePic.Mode.Lines; _view.Invalidate(); }
                 showDetails();
             }
             if (_specDirty)
@@ -301,6 +320,7 @@ namespace Kainos.Sstv.UI
                 _details.Invalidate();
             }
             markers();
+            sendTick();
             if (DateTime.UtcNow - _statusAt > TimeSpan.FromSeconds(8)) status(null);
         }
 
@@ -310,8 +330,8 @@ namespace Kainos.Sstv.UI
             if (_live != null) _live.Dispose();
             _live = new Bitmap(p.Mode.Width, p.Mode.Lines, System.Drawing.Imaging.PixelFormat.Format24bppRgb);
             using (Graphics g = Graphics.FromImage(_live)) g.Clear(Color.Black);
-            showLive();
-            status("Receiving " + p.Mode.Name);
+            if (_pvTemplate == null) showLive();
+            status("Receiving " + p.Mode.Name + (_pvTemplate != null ? " (click the picture to watch it)" : ""));
         }
 
         private void showLive()
@@ -332,8 +352,11 @@ namespace Kainos.Sstv.UI
             Bitmap b = Gallery.Open(it.Path);
             if (b == null) { status("Can't read " + Path.GetFileName(it.Path)); return; }
             if (_saved != null) _saved.Dispose();
+            clearPreview();
             _saved = b;
             _savedItem = it;
+            // a reply goes to this picture's sender, in its mode
+            receivedFrom(it.Call, SstvModes.All.FirstOrDefault(m => m.Name == it.Mode));
             _view.Image = b;
             _view.Caption = it.Caption + "   (click to go back to live)";
             _view.Progress = -1;
@@ -349,11 +372,12 @@ namespace Kainos.Sstv.UI
         private void finished(SstvPicture p)
         {
             bool complete = p.LinesDone >= p.Mode.Lines - 2;
+            receivedFrom(p.Callsign, p.Mode);
             bool keep = complete || (_host.GetSetting("savecut", "1") == "1" && p.LinesDone >= p.Mode.Lines / 4);
             if (p == _livePic && _live != null)
             {
                 Gallery.CopyInto(p, _live);
-                if (_savedItem == null) { _view.Caption = captionOf(p); _view.Progress = -1; _view.Invalidate(); }
+                if (showingLive) { _view.Caption = captionOf(p); _view.Progress = -1; _view.Invalidate(); }
             }
             if (keep)
             {
@@ -376,8 +400,11 @@ namespace Kainos.Sstv.UI
             if (p != _livePic) return;
             _livePic = null;
             if (_live != null) { _live.Dispose(); _live = null; }
-            if (_savedItem == null) showLive();
+            if (showingLive) showLive();
         }
+
+        // the live picture is what's shown (not a saved one, nor one ready to send)
+        private bool showingLive { get { return _savedItem == null && _pvTemplate == null; } }
 
         private void showDetails()
         {

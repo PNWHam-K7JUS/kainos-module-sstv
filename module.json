@@ -1,8 +1,8 @@
 {
   "id": "sstv",
   "name": "SSTV (slow-scan TV)",
-  "description": "Receive slow-scan TV pictures inside Kainos: Martin, Scottie, Robot 36 and PD modes, detected automatically, slant-corrected, with the sender's callsign from MMSSTV's FSK ID and a gallery. Sending with ready-made CQ and reply templates comes next.",
-  "version": "0.1.4",
+  "description": "Slow-scan TV inside Kainos: receive Martin, Scottie, Robot 36 and PD pictures (found automatically, slant-corrected, with the sender's callsign and a gallery), and send them: a one-time station setup makes your CQ, Reply and 73 pictures, and Reply answers in the sender's mode.",
+  "version": "0.2.0",
   "api": 1,
   "minKainos": "1.0.11",
   "entry": "Kainos.Sstv.dll",

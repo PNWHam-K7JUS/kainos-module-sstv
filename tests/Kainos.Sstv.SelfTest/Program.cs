@@ -217,6 +217,9 @@ namespace Kainos.Sstv.SelfTest
                     check(started == 0, "no picture from noise alone (" + started + ")");
                 }
 
+                // 3b. the templates: placeholders filled, saved and read back, and drawn (looked at in the PNGs)
+                if (!args.Contains("--quick")) Templates(work);
+
                 // 4. the module itself: its window, fed two pictures by a stand-in Kainos
                 if (!args.Contains("--quick")) UiTest(work, test);
 
@@ -347,16 +350,23 @@ namespace Kainos.Sstv.SelfTest
             if (Directory.Exists(data)) Directory.Delete(data, true);       // this test's own folder, from the last run
             FakeHost h = new FakeHost(work, data) { Speed = 10 };
             h.Settings["crisp"] = "0";      // the picture in the window itself, so a screenshot of the window shows it
+            // a station already set up (the first-run setup is looked at separately)
+            foreach (KeyValuePair<string, string> kv in new Dictionary<string, string> { { "st.call", "K7JUS" }, { "st.name", "Justin" }, { "st.qth", "Seattle WA" },
+                { "st.grid", "CN87" }, { "st.rig", "Hermes Lite 2" }, { "st.ant", "EFHW" }, { "st.pwr", "5 W" }, { "st.mode", "S1" }, { "st.done", "1" } })
+                h.Settings[kv.Key] = kv.Value;
             string received = Path.Combine(data, "Received");
             Func<int> count = () => Directory.Exists(received) ? Directory.GetFiles(received, "*.png").Length : 0;
             bool timedOut = false;
+            SstvMode replyMode = null;
+            Bitmap replyPic = null;
+            string toBox = "";
             using (Form f = new Form { ClientSize = new Size(1100, 620), Text = "Kainos SSTV self-test", StartPosition = FormStartPosition.CenterScreen })
             {
                 h.Window = f;
                 SstvModule mod = new SstvModule();
                 Stopwatch sw = Stopwatch.StartNew();
                 TimeSpan firstAt = TimeSpan.Zero;
-                bool midShot = false, takenAway = false;
+                bool midShot = false, takenAway = false, replied = false, txShot = false;
                 Timer t = new Timer { Interval = 200 };
                 f.Shown += (s, e) =>
                 {
@@ -376,10 +386,25 @@ namespace Kainos.Sstv.SelfTest
                     if (count() >= 1 && firstAt == TimeSpan.Zero) firstAt = sw.Elapsed;
                     if (!midShot && firstAt != TimeSpan.Zero && sw.Elapsed - firstAt > TimeSpan.FromSeconds(5)) { midShot = true; shot(f, Path.Combine(work, "ui-receiving.png")); }
                     if (takenAway) { t.Stop(); f.Close(); return; }
-                    if ((count() >= 2 && h.AirEmpty) || sw.Elapsed > TimeSpan.FromSeconds(60))
+                    UI.SstvPane pane = (UI.SstvPane)h.Panes[0].Content;
+                    // both pictures in: reply to the last (W1AW, Martin M1) and send it
+                    if (!replied && count() >= 2 && h.AirEmpty)
+                    {
+                        replied = true;
+                        shot(f, Path.Combine(work, "ui-done.png"));
+                        toBox = pane.To;
+                        pane.preview(TemplateStore.Load(h).First(x => x.Kind == "reply"));
+                        replyMode = pane.PreviewMode;
+                        replyPic = pane.PreviewBitmap != null ? new Bitmap(pane.PreviewBitmap) : null;
+                        pane.send();
+                        return;
+                    }
+                    if (replied && !txShot && h.Mox && h.TxAudio.Count > 48000 * 30) { txShot = true; shot(f, Path.Combine(work, "ui-sending.png")); }
+                    bool sentAll = replied && h.TxAudio.Count > 0 && !h.Mox && sw.Elapsed > firstAt + TimeSpan.FromSeconds(8);
+                    if (sentAll || sw.Elapsed > TimeSpan.FromSeconds(120))
                     {
                         timedOut = count() < 2;
-                        shot(f, Path.Combine(work, "ui-done.png"));
+                        shot(f, Path.Combine(work, "ui-sent.png"));
                         // another digital mode (FT8, RTTY...) opens and takes the receiver's audio: SSTV closes
                         h.TakeAway();
                         takenAway = true;
@@ -394,10 +419,59 @@ namespace Kainos.Sstv.SelfTest
             check(!timedOut && files.Length == 2 && files[0].Contains("_R36_K7JUS") && files[1].Contains("_M1_W1AW"),
                 "the window receives and keeps both pictures: " + string.Join(", ", files));
             check(File.Exists(Path.Combine(received, Path.ChangeExtension(files.FirstOrDefault() ?? "x", ".json"))), "each picture has its details beside it (.json)");
+            // the reply: to W1AW (from the FSK ID), in his mode, and what went out decodes back to the picture shown
+            float[] txa;
+            lock (h.TxAudio) txa = h.TxAudio.ToArray();
+            SstvPicture back = txa.Length > 0 ? decode(txa, 48000, 0.01) : null;
+            double rp = back != null && replyPic != null ? Psnr(SstvEncoder.Pixels(replyPic, back.Mode), back) : 0;
+            check(toBox == "W1AW", "To is filled in from the FSK ID of the picture received: \"" + toBox + "\"");
+            check(replyMode != null && replyMode.Short == "M1" && back != null && back.Mode.Short == "M1" && back.Callsign == "K7JUS" && rp > 25,
+                "Reply goes out in the sender's mode, with our FSK ID, and decodes back: " + (back == null ? "nothing sent (" + txa.Length + " samples)" :
+                back.Mode.Name + ", FSK ID \"" + back.Callsign + "\", PSNR " + rp.ToString("0.0") + " dB against the picture shown"));
+            if (replyPic != null) { replyPic.Save(Path.Combine(work, "ui-reply.png"), ImageFormat.Png); if (back != null) Save(back, Path.Combine(work, "ui-reply-decoded.png")); replyPic.Dispose(); }
+            check(!h.Mox, "the radio is un-keyed after sending");
             check(!h.Panes[0].IsOpen && !h.Menus[0].Checked && h.Acquires == 1, "closes when another digital mode takes the receiver's audio, and doesn't take it back");
             check(h.MarkerLog.Contains("0:1200,1500,2300"), "the SSTV tones marked on the panadapter (" + string.Join(" ", h.MarkerLog) + ")");
             check(h.LogLines.Any(l => l.StartsWith("received Martin M1 from W1AW")), "logged: " + h.LogLines.LastOrDefault());
             Console.WriteLine("      screenshots: " + Path.Combine(work, "ui-receiving.png") + ", ui-done.png");
+        }
+
+        private static void Templates(string work)
+        {
+            string data = Path.Combine(work, "tpl-data");
+            if (Directory.Exists(data)) Directory.Delete(data, true);       // this test's own folder, from the last run
+            FakeHost h = new FakeHost(work, data);
+            StationProfile st = new StationProfile { Call = "K7JUS", Name = "Justin", Qth = "Seattle WA", Grid = "CN87", Rig = "Hermes Lite 2", Ant = "", Pwr = "5 W", Mode = "S1", Done = true };
+            st.Save(h);
+            TemplateFields tf = new TemplateFields { Call = "W1AW", Rst = "575", Mode = SstvModes.ByShort("M1"), Utc = new DateTime(2026, 10, 18, 20, 15, 0, DateTimeKind.Utc) };
+            List<SstvTemplate> d = TemplateStore.Defaults();
+            string cqLines = SstvTemplate.Fill(d[0].Lines, st, tf), reTitle = SstvTemplate.Fill(d[1].Title, st, tf), seventy = SstvTemplate.Fill(d[2].Lines, st, tf);
+            check(cqLines == "Justin  \u00b7  Seattle WA  \u00b7  CN87\nHermes Lite 2  \u00b7  5 W\nPSE K" && reTitle == "W1AW de K7JUS" && seventy.Contains("2026-10-18  20:15Z  \u00b7  Martin M1"),
+                "placeholders filled, and an empty one (antenna) leaves no stray separator: " + cqLines.Replace("\n", " | "));
+            TemplateStore.Save(h, d);
+            List<SstvTemplate> back = TemplateStore.Load(h);
+            check(back.Count == 3 && back[1].Inset && back[1].Title == d[1].Title && back[2].Lines == d[2].Lines, "templates saved and read back (" + back.Count + ")");
+            using (Bitmap photo = TestPicture())
+            using (Bitmap rec = UI.TemplateEditorForm.SamplePicture())
+                foreach (SstvTemplate t in d)
+                    foreach (string bg in new[] { "photo", "gradient" })
+                    {
+                        SstvTemplate tt = t.Clone(); tt.Background = bg;
+                        using (Bitmap b = TemplateRenderer.Render(tt, st, tf, SstvModes.ByShort("S1"), bg == "photo" ? photo : null, rec))
+                            b.Save(Path.Combine(work, "tpl-" + t.Kind + "-" + bg + ".png"), ImageFormat.Png);
+                    }
+            // the forms, drawn to PNGs to look at
+            using (UI.StationSetupForm f = new UI.StationSetupForm(h, true) { StartPosition = FormStartPosition.Manual, Location = new Point(-3000, 0) })
+            {
+                f.Show(); Application.DoEvents(); System.Threading.Thread.Sleep(400); Application.DoEvents();
+                shot(f, Path.Combine(work, "form-setup.png")); f.Close();
+            }
+            using (UI.TemplateEditorForm f = new UI.TemplateEditorForm(h, null) { StartPosition = FormStartPosition.Manual, Location = new Point(-3000, 0) })
+            {
+                f.Show(); Application.DoEvents(); System.Threading.Thread.Sleep(400); Application.DoEvents();
+                shot(f, Path.Combine(work, "form-editor.png")); f.Close();
+            }
+            Console.WriteLine("      pictures: " + Path.Combine(work, "tpl-*.png") + ", form-setup.png, form-editor.png");
         }
 
         private static void shot(Form f, string path)

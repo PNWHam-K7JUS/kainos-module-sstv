@@ -2,7 +2,14 @@
 
 A module for [Kainos](https://github.com/PNWHam-K7JUS/Kainos), the Hermes Lite 2 SDR program: SSTV pictures received inside Kainos, in the Kainos look, with no virtual audio cables or separate program.
 
-This first version receives. Sending comes next. It will have a first-run setup that asks for your station details once and makes ready-to-use CQ, reply and 73 templates from them, and a Reply button that answers in the sender's mode.
+## Sending
+
+- **First-run setup**: the first time SSTV opens it asks for your callsign, name, town, grid, radio, antenna, power, a photo (optional) and the mode for your CQs, showing your CQ picture as you type. **Create my pictures** makes your **CQ**, **Reply** and **73** pictures from them. Options > Station setup... changes them later.
+- **The send bar**: **To** (their callsign, filled in from the FSK ID of the picture you received), the **report** (595, 575...), **CQ**, **Reply** and **73**, and **More** (your other pictures, Edit pictures..., Station setup...). A button shows the picture first; **Send** transmits it, **Stop** stops.
+- **Reply** answers the last picture received (or the one you click in the gallery): their callsign and report in the text, their picture small on the right, **in the mode they used**. **Mode** can be set by hand instead of Auto (CQs in your mode, replies in theirs).
+- **Your callsign goes out after each picture** as MMSSTV's FSK ID, so other stations' software shows who sent it (Station setup to turn off).
+- **Edit pictures...**: change any picture's top line, big text and bottom lines (with placeholders such as {CALL}, {RST}, {NAME}, {GRID}), its background (your photo, plain, or the picture received) and colour, or add your own.
+- **Transmitting** goes through Kainos as the other digital modes do: no audio cables or CAT. The radio keys only while the picture goes out, and stops if it's un-keyed elsewhere. Received audio is ignored while sending. Set the level once with **Tune** (a 1900 Hz tone) and **Options > Transmit level**: full power with the ALC barely moving.
 
 - **Modes found automatically** from the VIS header: Martin M1 and M2, Scottie S1, S2 and DX, Robot 36, and PD-50, 90, 120, 160, 180, 240 and 290. The header is found from the strongest tone in each 10 ms, as slowrx does, so weak signals start too: in the self-test, dependably down to 0 dB SNR in a 3 kHz bandwidth, and mostly at -6 dB.
 - **Start** begins a picture now in a mode you pick, for when its header was missed (QRM, or you tuned in part way). The line timing is found from the sync pulses.
@@ -35,6 +42,8 @@ One digital mode is open at a time: SSTV, FT8 / FT4 (the Digital Modes module) a
 | `SstvEncoder.cs` | A picture to SSTV audio: VIS, lines and FSK ID. Used by the self-test now, and for sending next. |
 | `SstvEngine.cs` | The thread that takes the receiver's audio from Kainos and feeds the decoder, plus the tuning spectrum. |
 | `Gallery.cs` | Saving and listing received pictures. |
+| `Station.cs`, `TemplateRenderer.cs` | The station's details, the picture templates (DataFolder	emplates.json) and drawing them. |
+| `SstvEngine.cs` (transmit) | Sending: the audio fed to Kainos's transmit tap with MOX, as the Digital Modes module does. |
 | `UI/` | The pane, drawn in the Kainos colours. |
 
 ## Building

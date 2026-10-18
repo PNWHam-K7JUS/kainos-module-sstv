@@ -87,11 +87,16 @@ namespace Kainos.Sstv.SelfTest
         }
 
         public int TxRate { get { return 48000; } }
-        public void TxStart() { }
-        public int TxWrite(float[] src, int n) { return n; }
-        public int TxQueued { get { return 0; } }
+        // transmit: what's written is kept (TxAudio) and drains at Speed times real time, as the radio takes it
+        public readonly List<float> TxAudio = new List<float>();
+        private System.Diagnostics.Stopwatch _txClock;
+        private long _txWritten;
+        private bool _txOn;
+        public void TxStart() { _txOn = true; _txClock = System.Diagnostics.Stopwatch.StartNew(); _txWritten = 0; }
+        public int TxWrite(float[] src, int n) { if (!_txOn) return 0; lock (TxAudio) for (int i = 0; i < n; i++) TxAudio.Add(src[i]); _txWritten += n; return n; }
+        public int TxQueued { get { return _txOn ? (int)Math.Max(0, _txWritten - _txClock.Elapsed.TotalSeconds * Speed * TxRate) : 0; } }
         public void TxClear() { }
-        public void TxStop() { }
+        public void TxStop() { _txOn = false; }
 
         public Color Bg { get { return Color.FromArgb(0x05, 0x0b, 0x13); } }
         public Color Surface { get { return Color.FromArgb(0x0a, 0x15, 0x20); } }

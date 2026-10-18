@@ -26,6 +26,8 @@
     <Reference Include="System.Drawing" />
     <Reference Include="System.Windows.Forms" />
     <Reference Include="Microsoft.VisualBasic" />
+    <Reference Include="System.Runtime.Serialization" />
+    <Reference Include="System.Xml" />
     <Reference Include="Kainos.ModuleApi">
       <HintPath>$(KainosBin)Kainos.ModuleApi.dll</HintPath>
       <Private>False</Private>
