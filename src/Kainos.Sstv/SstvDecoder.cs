@@ -41,6 +41,7 @@ namespace Kainos.Sstv
         public event Action<SstvPicture> Started;
         public event Action<SstvPicture> Progress;      // more lines drawn (on the decoder's thread)
         public event Action<SstvPicture> Finished;      // complete (or cut short), slant-corrected, with the FSK ID callsign
+        public event Action<SstvPicture> Abandoned;     // a false start: no line sync in its first lines (nothing to keep)
         public Func<DateTime> Now = () => DateTime.UtcNow;
 
         // ---- 1. the frequency of every sample ----
@@ -92,6 +93,7 @@ namespace Kainos.Sstv
         private void sample(float s)
         {
             _raw[_n % _raw.Length] = s;
+            syncScore(s);
             double c = Math.Cos(_mixPhase), sn = Math.Sin(_mixPhase);
             _mixPhase += 2 * Math.PI * Fmix / Rate;
             if (_mixPhase > 2 * Math.PI) _mixPhase -= 2 * Math.PI;
@@ -109,6 +111,40 @@ namespace Kainos.Sstv
             _n++;
             if (++_bcount == Block) { _bcount = 0; block(); }
         }
+
+        // ---- the sync tone, narrowband ----
+        // Each sample, the power at 1200 Hz (sync) against 1500, 1900 and 2300 Hz (the picture), each a running average over
+        // 3.33 ms (80 samples: its response is nil 300 Hz away, so black at 1500 Hz doesn't leak into sync). The score
+        // (sync's share, 0 - 1) holds up far deeper in noise than counting samples whose instantaneous frequency is low.
+        // Score n is the window ending at sample n.
+
+        private const int SyncWin = 80;
+        private static readonly double[] SyncHz = { 1200, 1500, 1900, 2300 };
+        private readonly float[] _score = new float[Cap];
+        private readonly double[] _sre = new double[4], _sim = new double[4];
+        private readonly double[,] _shRe = new double[4, SyncWin], _shIm = new double[4, SyncWin];
+        private readonly double[] _sph = new double[4];
+        private int _shPos;
+
+        private void syncScore(float x)
+        {
+            double total = 0, sync = 0;
+            for (int t = 0; t < 4; t++)
+            {
+                double re = x * Math.Cos(_sph[t]), im = -x * Math.Sin(_sph[t]);
+                _sph[t] += 2 * Math.PI * SyncHz[t] / Rate;
+                if (_sph[t] > 2 * Math.PI) _sph[t] -= 2 * Math.PI;
+                _sre[t] += re - _shRe[t, _shPos]; _sim[t] += im - _shIm[t, _shPos];
+                _shRe[t, _shPos] = re; _shIm[t, _shPos] = im;
+                double pw = _sre[t] * _sre[t] + _sim[t] * _sim[t];
+                total += pw;
+                if (t == 0) sync = pw;
+            }
+            _shPos = (_shPos + 1) % SyncWin;
+            _score[_n % Cap] = (float)(total > 1e-20 ? sync / total : 0.25);
+        }
+
+        private double S(long n) { return n < 0 || n >= _n || n < _n - Cap ? 0.25 : _score[n % Cap]; }
 
         // the filter delays everything by half its length: times are corrected by this many samples
         private int delay { get { return (_lp.Length - 1) / 2; } }
@@ -243,20 +279,16 @@ namespace Kainos.Sstv
 
             // the leader-to-start-bit edge, to the sample: about 300 ms before the stop bit's end
             long approxEdge = _n - delay - (long)(0.310 * Rate);     // blocks run 10 ms behind (block())
+            // the edge from the sync-tone score (syncScore): about 0 over the leader, about 1 over the 30 ms start bit (1200 Hz);
+            // the edge is where the 25 ms after it outscore the 25 ms before it most. Score windows lag 80 samples.
             long edge = approxEdge;
-            double best = double.MaxValue;
-            double half = (SstvModes.FLeader + SstvModes.FSync) / 2 + shift;
+            int half = (int)(0.025 * Rate);
+            double bestStep = double.MinValue;
             for (long k = approxEdge - Rate / 50; k <= approxEdge + Rate / 50; k++)
             {
-                // the falling crossing: before it leader, after it sync
                 double before = 0, after = 0;
-                for (int j = 1; j <= 24; j++) { before += F(k - j + delay); after += F(k + j + delay); }
-                before /= 24; after /= 24;
-                if (before > half && after < half)
-                {
-                    double d = Math.Abs(F(k + delay) - half);
-                    if (d < best) { best = d; edge = k; }
-                }
+                for (int j = 0; j < half; j += 4) { before += S(k - j - 1 + SyncWin / 2); after += S(k + j + SyncWin / 2); }
+                if (after - before > bestStep) { bestStep = after - before; edge = k; }
             }
             start(mode, edge + (long)Math.Round(0.300 * Rate), shift);
         }
@@ -272,7 +304,8 @@ namespace Kainos.Sstv
         private int _nextLine;
         private double _period;                         // line length now believed (samples)
         private double _phase;                          // where line 0's sync starts (samples)
-        private int _missed;
+        private bool[] _onTrack;                        // each line's sync found within 2.5 ms of the fitted line timing
+        private bool _refolded;                         // the first lines' syncs have been looked for together
         private double[] _cb, _cr;                      // Robot 36: the last chroma lines
 
         private void start(SstvMode m, long t0, double shift)
@@ -286,11 +319,12 @@ namespace Kainos.Sstv
             _nextLine = 0;
             _period = m.LineTime * Rate;
             _phase = _t0 + m.SyncOffset * Rate;
-            _missed = 0;
+            _onTrack = new bool[m.RadioLines];
+            _refolded = false;
             _cb = new double[m.Width];
             _cr = new double[m.Width];
             for (int i = 0; i < m.Width; i++) { _cb[i] = 128; _cr[i] = 128; }
-            _visHold = _n + (long)(m.Duration * Rate);
+            _visHold = _n + Rate;               // a new header can start a new picture after this (as MMSSTV does)
             Started?.Invoke(_pic);
         }
 
@@ -306,45 +340,53 @@ namespace Kainos.Sstv
                 if (_n < end) break;
                 if (_hunt) { hunt(); continue; }
                 findSync(_nextLine);
+                // noise "finds" a sync pulse somewhere in the search window on most lines; a real one is where the line
+                // timing so far (before this line is fitted in) says it should be
+                _onTrack[_nextLine] = onTrack(_nextLine);
                 refit(false);
                 drawLine(_nextLine);
                 _nextLine++;
                 drew = true;
-                // the signal is gone: a long run of lines without sync, once the picture is well under way
-                _missed = double.IsNaN(_sync[_nextLine - 1]) ? _missed + 1 : 0;
-                if (_missed >= 10 && _nextLine > m.RadioLines / 5) { finish(true); return; }
+                // a false start: hardly any sync on the line timing in the first lines (a real picture has most of them).
+                // First the first lines' syncs are looked for together (the start may be off) and the lines drawn again.
+                if (_nextLine == 12 && tracked(0, 12) < 5)
+                {
+                    if (_refolded) { abandon(); return; }
+                    _refolded = true;
+                    foldHunt(12);
+                    for (int i = 0; i < _sync.Length; i++) { _sync[i] = double.NaN; _onTrack[i] = false; }
+                    _nextLine = 0;
+                    continue;
+                }
+                // the signal is gone: fewer than 3 syncs on the line timing in the last 20 lines
+                if (_nextLine >= 20 && tracked(_nextLine - 20, _nextLine) < 3) { finish(true); return; }
             }
             if (drew) Progress?.Invoke(_pic);
             if (_nextLine >= m.RadioLines) finish(false);
         }
 
-        // the sync pulse of line l: the best stretch of the sync's length below 1350 Hz near where it's expected
+        // the sync pulse of line l: near where it's expected, the stretch of the sync's length where the 1200 Hz tone's share
+        // (syncScore) is highest. Windows wholly inside a pulse start at most 80 samples after it, so a pulse starting at t
+        // is scored by the windows ending from t + 80 to t + len.
         private void findSync(int l)
         {
             SstvMode m = _pic.Mode;
             double expect = _phase + l * _period;
             int len = (int)Math.Round(m.Sync * Rate);
+            int inner = Math.Max(8, len - SyncWin);
             int span = (int)Math.Round(Math.Min(0.04 * m.LineTime, 0.012) * Rate);
-            double thr = 1350 + _shift;
-            // a running count over the window
-            int from = (int)(-span), to = span;
-            double bestScore = -1, bestAt = 0;
-            int count = 0;
-            long a0 = (long)Math.Round(expect) + from + delay;
-            for (int j = 0; j < len; j++) if (F(a0 + j) < thr) count++;
-            for (int o = from; o <= to; o++)
+            long e0 = (long)Math.Round(expect);
+            double sum = 0;
+            for (int j = 0; j < inner; j++) sum += S(e0 - span + SyncWin + j);
+            double best = -1, bestAt = expect;
+            for (int o = -span; o <= span; o++)
             {
-                if (o > from)
-                {
-                    long gone = (long)Math.Round(expect) + o - 1 + delay, come = gone + len;
-                    if (F(gone) < thr) count--;
-                    if (F(come) < thr) count++;
-                }
-                double score = count / (double)len;
-                // prefer the middle on a tie (an unbroken stretch longer than the pulse)
-                if (score > bestScore + 1e-9 || (Math.Abs(score - bestScore) < 1e-9 && Math.Abs(o) < Math.Abs(bestAt - expect))) { bestScore = score; bestAt = expect + o; }
+                if (o > -span) { sum -= S(e0 + o - 1 + SyncWin); sum += S(e0 + o - 1 + SyncWin + inner); }
+                double score = sum / inner;
+                if (score > best + 1e-9 || (Math.Abs(score - best) < 1e-9 && Math.Abs(o) < Math.Abs(bestAt - expect))) { best = score; bestAt = e0 + o; }
             }
-            _sync[l] = bestScore >= 0.6 ? bestAt : double.NaN;
+            // noise alone scores about 0.25 (four tones alike); a clean pulse near 1
+            _sync[l] = best >= 0.5 ? bestAt : double.NaN;
         }
 
         // a straight line through the syncs found (least squares, then again without those more than 2 ms off)
@@ -477,18 +519,65 @@ namespace Kainos.Sstv
             _hunt = false;
             SstvMode m = _pic.Mode;
             int len = (int)Math.Round(m.Sync * Rate), per = (int)Math.Round(_period);
-            double thr = 1350;
-            long a0 = _t0 + delay;
-            int count = 0, best = -1, bestAt = 0;
-            for (int j = 0; j < len; j++) if (F(a0 + j) < thr) count++;
+            int inner = Math.Max(8, len - SyncWin);
+            long a0 = _t0 + SyncWin;
+            double sum = 0, best = -1;
+            int bestAt = 0;
+            for (int j = 0; j < inner; j++) sum += S(a0 + j);
             for (int o = 0; o < per; o++)
             {
-                if (o > 0) { if (F(a0 + o - 1) < thr) count--; if (F(a0 + o - 1 + len) < thr) count++; }
-                if (count > best) { best = count; bestAt = o; }
+                if (o > 0) { sum -= S(a0 + o - 1); sum += S(a0 + o - 1 + inner); }
+                if (sum > best) { best = sum; bestAt = o; }
             }
             _phase = _t0 + bestAt;
             _t0 = (long)(_phase - m.SyncOffset * Rate);
-            _visHold = _n + (long)(m.Duration * Rate);
+            _visHold = _n + Rate;
+        }
+
+        private bool onTrack(int l)
+        {
+            return !double.IsNaN(_sync[l]) && Math.Abs(_sync[l] - (_phase + l * _period)) < 0.0025 * Rate;
+        }
+
+        private int tracked(int from, int to)
+        {
+            int n = 0;
+            for (int l = from; l < to; l++) if (_onTrack[l]) n++;
+            return n;
+        }
+
+        // the first lines' sync pulses, found together: the offset within a line where the sync score summed over lines
+        // 0 to n-1 (at the line length believed) is highest. Weak pulses add up where noise doesn't.
+        private void foldHunt(int n)
+        {
+            SstvMode m = _pic.Mode;
+            int len = (int)Math.Round(m.Sync * Rate), inner = Math.Max(8, len - SyncWin);
+            int per = (int)Math.Round(_period), from = -per / 2;
+            double[] tot = new double[per];
+            for (int l = 0; l < n; l++)
+            {
+                long a0 = (long)Math.Round(_phase + l * _period) + from + SyncWin;
+                double sum = 0;
+                for (int j = 0; j < inner; j++) sum += S(a0 + j);
+                for (int o = 0; o < per; o++)
+                {
+                    if (o > 0) { sum -= S(a0 + o - 1); sum += S(a0 + o - 1 + inner); }
+                    tot[o] += sum;
+                }
+            }
+            int best = 0;
+            for (int o = 1; o < per; o++) if (tot[o] > tot[best]) best = o;
+            _phase += from + best;
+            _t0 = (long)(_phase - m.SyncOffset * Rate);
+        }
+
+        private void abandon()
+        {
+            SstvPicture p = _pic;
+            _pic = null;
+            _hunt = false;
+            Diag?.Invoke("false start (" + p.Mode.Name + "): no line sync in its first lines, dropped");
+            Abandoned?.Invoke(p);
         }
 
         // ends the picture being received where it is (the Skip button)

@@ -166,6 +166,7 @@ namespace Kainos.Sstv.UI
             _e.Status += s => _host.BeginInvoke(() => status(s));
             _e.Decoder.Progress += p => _dirty = true;
             _e.Decoder.Finished += p => _host.BeginInvoke(() => finished(p));
+            _e.Decoder.Abandoned += p => _host.BeginInvoke(() => abandoned(p));
             _e.SpectrumReady += () => _specDirty = true;
             // headers that nearly passed: in the log, and briefly in the status line
             _e.Decoder.Diag += d => { _host.Log("vis: " + d); _host.BeginInvoke(() => status("Heard what may be a " + d)); };
@@ -367,6 +368,15 @@ namespace Kainos.Sstv.UI
             status((complete ? "Received " : "Cut short: ") + p.Mode.Name + (p.Callsign.Length > 0 ? " from " + p.Callsign : "") +
                    (keep ? "" : " (not kept: less than a quarter came in)"));
             showDetails();
+        }
+
+        // a false start (no line sync): drop the half-drawn picture
+        private void abandoned(SstvPicture p)
+        {
+            if (p != _livePic) return;
+            _livePic = null;
+            if (_live != null) { _live.Dispose(); _live = null; }
+            if (_savedItem == null) showLive();
         }
 
         private void showDetails()

@@ -24,6 +24,7 @@ namespace Kainos.Sstv.SelfTest
     internal static class Program
     {
         private static int _fail;
+        internal static bool Verbose;
         private static readonly Random Rnd = new Random(42);
 
         private static void check(bool ok, string what)
@@ -38,6 +39,8 @@ namespace Kainos.Sstv.SelfTest
             string work = Path.Combine(Path.GetTempPath(), "kainos-sstv-selftest");
             Directory.CreateDirectory(work);
             bool keep = args.Contains("--keep");
+            Verbose = args.Contains("--verbose");
+            if (args.Contains("--sweep")) { using (Bitmap tp = TestPicture()) Sweep(tp, work); return 0; }
             int wi = Array.IndexOf(args, "--wav");
             if (wi >= 0 && wi + 1 < args.Length) return DecodeWav(args[wi + 1], work);
             using (Bitmap test = TestPicture())
@@ -103,7 +106,7 @@ namespace Kainos.Sstv.SelfTest
                     d.Finished += pp => done = pp;
                     int chunk = 960, fed = 0;
                     float[] buf = new float[chunk];
-                    for (int i = 0; i < rest.Length + 48000 * 7; i += chunk)        // and 7 s after, for the end to be noticed
+                    for (int i = 0; i < rest.Length + 48000 * 12; i += chunk)       // and 12 s after, for the end to be noticed
                     {
                         for (int j = 0; j < chunk; j++) buf[j] = (float)((i + j < rest.Length ? rest[i + j] * 0.5 : 0) + Gauss() * 0.05);
                         d.Push(buf, chunk, 48000);
@@ -124,6 +127,52 @@ namespace Kainos.Sstv.SelfTest
                             if (ps > bestPsnr) { bestPsnr = ps; bestOff = off; }
                         }
                     check(done != null && bestPsnr > 26, "Start now without a header: " + (done == null ? "no picture" : "PSNR " + bestPsnr.ToString("0.0") + " dB from sent line " + bestOff + ", " + done.LinesDone + " lines"));
+                }
+
+                // 2d. weak pictures run to the end (as on HF): 3 and 0 dB SNR in 3 kHz
+                foreach (string ms in new[] { "M1", "R36" })
+                    foreach (double snr in new[] { 3.0, 0.0 })
+                    {
+                        SstvMode m = SstvModes.ByShort(ms);
+                        double sigma = Math.Sqrt(0.125 / Math.Pow(10, snr / 10) * 24000 / 3000);
+                        SstvPicture p = decode(SstvEncoder.Audio(SstvEncoder.Tones(m, SstvEncoder.Pixels(test, m), "K7JUS"), 48000), 48000, sigma);
+                        double psnr = p != null ? Psnr(SstvEncoder.Pixels(test, m), p) : 0;
+                        check(p != null && p.LinesDone >= m.Lines - 2 && psnr > 5.5, m.Name + " at " + snr.ToString("0") + " dB runs to the end: " +
+                            (p == null ? "no picture" : p.LinesDone + "/" + m.Lines + " lines, PSNR " + psnr.ToString("0.0") + ", FSK ID \"" + p.Callsign + "\""));
+                    }
+
+                // 2e. a header and then no picture (a false start, or the sender stopped): dropped, not kept
+                {
+                    SstvMode m = SstvModes.ByShort("M1");
+                    float[] head = SstvEncoder.Audio(SstvEncoder.Tones(m, SstvEncoder.Pixels(test, m), null), 48000).Take((int)(0.91 * 48000)).ToArray();
+                    float[] a = new float[head.Length + 48000 * 20];
+                    Array.Copy(head, a, head.Length);
+                    int started = 0, abandoned = 0, finished = 0;
+                    for (int trial = 0; trial < 10; trial++)
+                    {
+                        SstvDecoder d = new SstvDecoder();
+                        d.Started += _ => started++; d.Abandoned += _ => abandoned++;
+                        d.Finished += p => { if (p.LinesDone >= p.Mode.Lines / 4) finished++; };      // what the window would keep
+                        float[] buf = new float[960];
+                        for (int i = 0; i < a.Length; i += 960) { for (int j = 0; j < 960; j++) buf[j] = (float)((i + j < a.Length ? a[i + j] * 0.5 : 0) + Gauss() * 0.3); d.Push(buf, 960, 48000); }
+                    }
+                    check(started == 10 && abandoned >= 9 && finished == 0, "a header with only noise after it is dropped, 10 tries (started " + started + ", dropped " + abandoned + ", kept " + finished + ")");
+                }
+
+                // 2f. a new header part way through a picture starts the new one (the first is kept, cut short)
+                {
+                    SstvMode m1 = SstvModes.ByShort("M1"), r36 = SstvModes.ByShort("R36");
+                    float[] first = SstvEncoder.Encode(test, m1, 48000);
+                    float[] second = SstvEncoder.Encode(test, r36, 48000, "K7JUS");
+                    int cutAt = (int)(first.Length * 0.6);
+                    float[] a = first.Take(cutAt).Concat(second).ToArray();
+                    List<SstvPicture> got = new List<SstvPicture>();
+                    SstvDecoder d = new SstvDecoder();
+                    d.Finished += p => got.Add(p);
+                    float[] buf = new float[960];
+                    for (int i = 0; i < a.Length + 48000 * 3; i += 960) { for (int j = 0; j < 960; j++) buf[j] = (float)((i + j < a.Length ? a[i + j] * 0.5 : 0) + Gauss() * 0.05); d.Push(buf, 960, 48000); }
+                    check(got.Count == 2 && got[0].Mode == m1 && got[0].LinesDone > 100 && got[1].Mode == r36 && got[1].LinesDone >= 238 && got[1].Callsign == "K7JUS",
+                        "a header mid-picture starts the new picture: " + string.Join(", ", got.Select(p => p.Mode.Short + " " + p.LinesDone + " lines")));
                 }
 
                 // 3. nothing from noise alone
@@ -147,6 +196,24 @@ namespace Kainos.Sstv.SelfTest
             }
             Console.WriteLine(_fail == 0 ? "All passed" : _fail + " failed");
             return _fail == 0 ? 0 : 1;
+        }
+
+        // pictures at falling SNR (3 kHz bandwidth): lines drawn, whether it ran to the end, PSNR
+        private static void Sweep(Bitmap test, string work)
+        {
+            foreach (string ms in new[] { "M1", "S1", "R36", "PD120" })
+            {
+                SstvMode m = SstvModes.ByShort(ms);
+                float[] a = SstvEncoder.Audio(SstvEncoder.Tones(m, SstvEncoder.Pixels(test, m), "K7JUS"), 48000);
+                foreach (double snr in new[] { 12.0, 9, 6, 3, 0 })
+                {
+                    double sigma = Math.Sqrt(0.125 / Math.Pow(10, snr / 10) * 24000 / 3000);
+                    SstvPicture p = decode(a, 48000, sigma);
+                    Console.WriteLine(m.Short.PadRight(6) + snr.ToString("0").PadLeft(3) + " dB: " + (p == null ? "no picture" :
+                        p.LinesDone + "/" + m.Lines + " lines, PSNR " + Psnr(SstvEncoder.Pixels(test, m), p).ToString("0.0") + ", slant " + p.SlantPpm.ToString("0") + ", ID \"" + p.Callsign + "\""));
+                    if (p != null) Save(p, Path.Combine(work, "sweep-" + m.Short + "-" + snr.ToString("0") + "dB.png"));
+                }
+            }
         }
 
         // how many pictures start from this audio (with noise), and 1 s of noise first
@@ -215,6 +282,7 @@ namespace Kainos.Sstv.SelfTest
             SstvDecoder d = new SstvDecoder();
             SstvPicture done = null;
             d.Finished += p => done = p;
+            if (Verbose) { d.Diag += x => Console.WriteLine("    diag: " + x); d.Started += p => Console.WriteLine("    start " + p.Mode.Name); }
             int chunk = rate / 50;
             float[] buf = new float[chunk];
             for (int i = 0; i < all.Length; i += chunk)
