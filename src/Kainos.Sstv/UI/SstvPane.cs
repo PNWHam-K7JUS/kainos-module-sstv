@@ -79,7 +79,7 @@ namespace Kainos.Sstv.UI
             _band = btn("Band", "Tune to a band's SSTV frequency (14.230 USB, 7.171 LSB...)");
             _rxSel = btn("RX1", "The receiver listened to: RX1 or RX2");
             _startBtn = btn("Start", "Start a picture now in a mode you pick, for when its header was missed (weak, or you tuned in part way). Normally the mode is found by itself.");
-            _skip = btn("Skip", "End the picture being received now (it's kept if a quarter or more came in)");
+            _skip = btn("Skip", "End the picture being received now (it's kept if a quarter or more came in). It isn't started again from its line sync for a minute.");
             _openFolder = btn("Pictures", "Open the folder the received pictures are saved in");
             _pop = btn("Pop out", "Docked under the panadapter, or in its own window");
             _options = btn("Options", "Saving, panadapter markers and display");
@@ -98,6 +98,7 @@ namespace Kainos.Sstv.UI
             buildSendBar();
             wire();
             _e.Rx = host.GetSetting("rx", "0") == "1" ? 1 : 0;
+            _e.Decoder.AutoStart = host.GetSetting("autostart", "1") == "1";
             _rxSel.Text = "RX" + (_e.Rx + 1);
             _gallery.SetItems(Gallery.Load(_folder, 300));
 
@@ -253,6 +254,8 @@ namespace Kainos.Sstv.UI
                 return it;
             };
             check("Keep pictures that were cut short", "savecut", "1", "Save a picture that ended early (signal lost, or Skip) if a quarter or more of it came in");
+            ToolStripMenuItem auto = check("Start pictures without a header (from their line sync)", "autostart", "1", "When a picture's header was missed (a fade, QRM, or you tuned in part way), find its mode from the rhythm of its line sync and start it");
+            auto.Click += (s, e) => _e.Decoder.AutoStart = _host.GetSetting("autostart", "1") == "1";
             check("Show the SSTV tones on the panadapter", "markers", "1", "Lines at sync (1200 Hz), black (1500 Hz) and white (2300 Hz) from the VFO, to tune by");
             check("Log window after sending a 73", "log73", "1", "Open Log QSO, filled in, when your 73 picture has gone out");
             check("Send logged QSOs to logging programs", "udp.on", "1", "As WSJT-X does (UDP \"Logged ADIF\"), for Log4OM, N1MM+, HRD, DXKeeper and GridTracker");
@@ -343,7 +346,7 @@ namespace Kainos.Sstv.UI
             _live = new Bitmap(p.Mode.Width, p.Mode.Lines, System.Drawing.Imaging.PixelFormat.Format24bppRgb);
             using (Graphics g = Graphics.FromImage(_live)) g.Clear(Color.Black);
             if (_pvTemplate == null) showLive();
-            status("Receiving " + p.Mode.Name + (_pvTemplate != null ? " (click the picture to watch it)" : ""));
+            status("Receiving " + p.Mode.Name + (p.NoHeader ? " (no header: found from its line sync)" : "") + (_pvTemplate != null ? " (click the picture to watch it)" : ""));
         }
 
         private void showLive()

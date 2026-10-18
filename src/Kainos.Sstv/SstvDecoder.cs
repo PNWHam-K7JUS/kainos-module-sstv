@@ -32,6 +32,7 @@ namespace Kainos.Sstv
         public double FreqShift;            // Hz: how far the sender was off tune
         public double SlantPpm;             // the sender's clock against ours (parts per million)
         public DateTime StartUtc;
+        public bool NoHeader;               // started from its line sync (the header was missed)
     }
 
     internal class SstvDecoder
@@ -120,6 +121,15 @@ namespace Kainos.Sstv
             _freq[_n % Cap] = (float)Math.Max(800, Math.Min(2800, f));
             _n++;
             if (++_bcount == Block) { _bcount = 0; block(); }
+            // the sync score, decimated by 8 (3 kHz), for finding a picture by its line rhythm
+            _sdAcc += _score[(_n - 1) % Cap];
+            if (++_sdK == AutoDec)
+            {
+                _sd[_sdCount % _sd.Length] = (float)(_sdAcc / AutoDec);
+                _sdCount++;
+                _sdAcc = 0; _sdK = 0;
+                if (_sdCount % (AutoRate / 2) == 0) autoCheck();
+            }
         }
 
         // ---- the sync tone, narrowband ----
@@ -330,6 +340,8 @@ namespace Kainos.Sstv
             _period = m.LineTime * Rate;
             _phase = _t0 + m.SyncOffset * Rate;
             _onTrack = new bool[m.RadioLines];
+            _syncHere = new double[m.RadioLines];
+            _lineNoise = Enumerable.Repeat(double.NaN, m.RadioLines).ToArray();
             _refolded = false;
             _cb = new double[m.Width];
             _cr = new double[m.Width];
@@ -353,6 +365,7 @@ namespace Kainos.Sstv
                 // noise "finds" a sync pulse somewhere in the search window on most lines; a real one is where the line
                 // timing so far (before this line is fitted in) says it should be
                 _onTrack[_nextLine] = onTrack(_nextLine);
+                _syncHere[_nextLine] = syncHere(_nextLine);
                 refit(false);
                 drawLine(_nextLine);
                 _nextLine++;
@@ -367,6 +380,14 @@ namespace Kainos.Sstv
                     for (int i = 0; i < _sync.Length; i++) { _sync[i] = double.NaN; _onTrack[i] = false; }
                     _nextLine = 0;
                     continue;
+                }
+                // Started without a header, it began part way through, so its count of lines says nothing about where it
+                // ends: it stops when its signal does. The sync score right where the line timing puts the pulse, averaged
+                // over the last 6 s (at least 8 lines): about 0.25 in noise, well above with a signal, even a weak one.
+                if (_pic.NoHeader)
+                {
+                    int n = Math.Max(8, Math.Min(40, (int)Math.Round(6 / m.LineTime)));
+                    if (_nextLine >= n && meanSyncHere(_nextLine - n, _nextLine) < 0.38) { finish(true); return; }
                 }
                 // Once a picture is confirmed, it runs to its end on the line timing even if the signal fades (as MMSSTV
                 // does): fading on HF comes back, and Skip or a new header ends it sooner.
@@ -429,12 +450,39 @@ namespace Kainos.Sstv
             return true;
         }
 
-        private double px(double t0, double pixelTime, int x)
+        // how the pixels are measured at a noise level (Hz): clean, the pixel's own time; noisier, longer and trimmed
+        internal static double WidenPer100Hz = 1.5, TrimMax = 0;   // from the self-test's sweep (--sweep --widen --trim): trimming didn't help
+        private void setPixelWindow(double noise)
+        {
+            double over = Math.Max(0, noise - 40) / 100.0;
+            _pxWiden = Math.Min(3, 1 + WidenPer100Hz * over);
+            _pxTrim = Math.Min(TrimMax, 0.25 * over);
+        }
+
+        private readonly List<double> _pxBuf = new List<double>(256);
+
+        // colour difference (Robot 36, PD) is measured over longer again when noisy: the eye sees much less of its detail
+        internal static double ChromaWiden = 3;
+
+        private double pxc(double t0, double pixelTime, int x) { return px(t0, pixelTime, x, _pxWiden > 1.01 ? ChromaWiden : 1); }
+
+        private double px(double t0, double pixelTime, int x, double more = 1)
         {
             double k = _period / (_pic.Mode.LineTime * Rate);    // the sender's clock against ours
             double w = pixelTime * Rate * k;
             double c = t0 + (x + 0.5) * w;
-            return SstvModes.ValueOf(meanF(c - w / 2, c + w / 2) - _shift);
+            double half = w * _pxWiden * more / 2;
+            if (_pxTrim <= 0.001) return SstvModes.ValueOf(meanF(c - half, c + half) - _shift);
+            // a trimmed mean: the noise's spikes (FM clicks) left out
+            long a = (long)Math.Floor(c - half) + delay, b = (long)Math.Ceiling(c + half) + delay;
+            if (b <= a) b = a + 1;
+            _pxBuf.Clear();
+            for (long i = a; i < b; i++) _pxBuf.Add(F(i));
+            _pxBuf.Sort();
+            int cut = (int)(_pxBuf.Count * _pxTrim), n = _pxBuf.Count - 2 * cut;
+            double sum = 0;
+            for (int i = cut; i < cut + n; i++) sum += _pxBuf[i];
+            return SstvModes.ValueOf(sum / Math.Max(1, n) - _shift);
         }
 
         private void put(int y, int x, int r, int g, int b)
@@ -443,11 +491,49 @@ namespace Kainos.Sstv
             _pic.Rgb[i] = (byte)r; _pic.Rgb[i + 1] = (byte)g; _pic.Rgb[i + 2] = (byte)b;
         }
 
+        // ---- how noisy the picture is ----
+        // The frequency's spread over the middle half of each sync pulse (a steady 1200 Hz), per line: noise, since the
+        // tone itself doesn't move. Pixels are measured over longer and with outliers left out as it rises.
+
+        private double[] _lineNoise;                    // Hz, per radio line (NaN: not measured)
+
+        private void measureNoise(int l)
+        {
+            SstvMode m = _pic.Mode;
+            double at = !double.IsNaN(_sync[l]) && _onTrack[l] ? _sync[l] : _phase + l * _period;
+            int len = (int)(m.Sync * Rate);
+            long a = (long)(at + len * 0.25), b = (long)(at + len * 0.75);
+            if (b - a < 12) { _lineNoise[l] = double.NaN; return; }
+            double sum = 0, sq = 0;
+            int n = 0;
+            for (long i = a; i < b; i++) { double f = F(i + delay); sum += f; sq += f * f; n++; }
+            double mean = sum / n;
+            _lineNoise[l] = Math.Sqrt(Math.Max(0, sq / n - mean * mean));
+        }
+
+        // the noise around line l: the median of the lines measured nearby
+        private double noiseAt(int l)
+        {
+            List<double> v = new List<double>();
+            for (int i = Math.Max(0, l - 8); i <= Math.Min(_lineNoise.Length - 1, l + 8); i++) if (!double.IsNaN(_lineNoise[i])) v.Add(_lineNoise[i]);
+            if (v.Count == 0) return 0;
+            v.Sort();
+            return v[v.Count / 2];
+        }
+
+        internal double LastNoise;                      // for the self-test
+        private double _pxWiden = 1;                    // the pixel window's widening for the line being drawn
+        private double _pxTrim;                         // the share of samples left out at each end (outliers)
+
         private void drawLine(int l)
         {
             SstvMode m = _pic.Mode;
             double k = _period / (m.LineTime * Rate);
             double ls = _phase + l * _period - m.SyncOffset * Rate * k;     // where the line begins
+            if (double.IsNaN(_lineNoise[l])) measureNoise(l);
+            double nz = noiseAt(l);
+            LastNoise = nz;
+            setPixelWindow(nz);
             Func<double, double> at = s => ls + s * Rate * k;                // a time in the line, in samples
             int w = m.Width;
             switch (m.Family)
@@ -476,7 +562,7 @@ namespace Kainos.Sstv
                     for (int x = 0; x < w; x++)
                     {
                         yy[x] = px(y0, m.PixelTime, x);
-                        double c = px(c0, m.PixelTime / 2, x);
+                        double c = pxc(c0, m.PixelTime / 2, x);
                         if (isCr) _cr[x] = c; else _cb[x] = c;
                     }
                     for (int x = 0; x < w; x++) { int r, g, b; SstvModes.ToRgb(yy[x], _cb[x], _cr[x], out r, out g, out b); put(l, x, r, g, b); }
@@ -497,7 +583,7 @@ namespace Kainos.Sstv
                     double t = at(m.Sync + m.Porch), s = m.Scan;
                     for (int x = 0; x < w; x++)
                     {
-                        double ya = px(t, m.PixelTime, x), cr = px(t + s * Rate * k, m.PixelTime, x), cb = px(t + 2 * s * Rate * k, m.PixelTime, x), yb = px(t + 3 * s * Rate * k, m.PixelTime, x);
+                        double ya = px(t, m.PixelTime, x), cr = pxc(t + s * Rate * k, m.PixelTime, x), cb = pxc(t + 2 * s * Rate * k, m.PixelTime, x), yb = px(t + 3 * s * Rate * k, m.PixelTime, x);
                         int r, g, b;
                         SstvModes.ToRgb(ya, cb, cr, out r, out g, out b); put(2 * l, x, r, g, b);
                         SstvModes.ToRgb(yb, cb, cr, out r, out g, out b); put(2 * l + 1, x, r, g, b);
@@ -544,6 +630,24 @@ namespace Kainos.Sstv
             _visHold = _n + Rate;
         }
 
+        private double[] _syncHere;                     // each line's sync score right where the line timing puts the pulse
+
+        private double syncHere(int l)
+        {
+            int len = (int)Math.Round(_pic.Mode.Sync * Rate), inner = Math.Max(8, len - SyncWin);
+            long a = (long)Math.Round(_phase + l * _period) + SyncWin;
+            double sum = 0;
+            for (int j = 0; j < inner; j++) sum += S(a + j);
+            return sum / inner;
+        }
+
+        private double meanSyncHere(int from, int to)
+        {
+            double sum = 0;
+            for (int l = from; l < to; l++) sum += _syncHere[l];
+            return sum / Math.Max(1, to - from);
+        }
+
         private bool onTrack(int l)
         {
             return !double.IsNaN(_sync[l]) && Math.Abs(_sync[l] - (_phase + l * _period)) < 0.0025 * Rate;
@@ -583,6 +687,8 @@ namespace Kainos.Sstv
 
         private void abandon()
         {
+            _lastEnd = _n;
+            _autoHold = Math.Max(_autoHold, _n + 3L * Rate);
             SstvPicture p = _pic;
             _pic = null;
             _hunt = false;
@@ -592,6 +698,81 @@ namespace Kainos.Sstv
 
         // ends the picture being received where it is (the Skip button)
         public void Cut() { finish(true); }
+
+        // Skip: the picture ends, and isn't started again from its line sync for a minute
+        public void Skip() { if (_pic != null && !_pic.Complete) { finish(true); _autoHold = _n + 60L * Rate; } }
+
+        // ---- a picture without its header: found by its line rhythm ----
+        // Each mode sends its sync pulse once a line, at its own line length. Every 0.5 s, when nothing is being received,
+        // the sync score of the last 10 lines (decimated to 3 kHz) is folded at each mode's line length (and at clocks up
+        // to 1000 ppm off): where most lines have a sync at the same place, that's a picture in that mode, already 10 lines
+        // in. It starts from the first of those lines (the audio is kept), with the header's checks after it as any start.
+
+        public bool AutoStart = true;
+        private const int AutoDec = 8, AutoRate = Rate / AutoDec, AutoLines = 10;
+        private readonly float[] _sd = new float[AutoRate * 12];
+        private long _sdCount;
+        private double _sdAcc;
+        private int _sdK;
+        private long _autoHold;                         // no auto start before this sample
+        private long _lastEnd;                          // where the last picture ended (its syncs aren't looked at again)
+
+        private void autoCheck()
+        {
+            if (!AutoStart || _n < _autoHold || (_pic != null && !_pic.Complete) || _idFor != null) return;
+            SstvMode best = null;
+            double bestScore = 0, bestPer = 0;
+            long bestAt = 0;
+            int bestHits = 0;
+            foreach (SstvMode m in SstvModes.All)
+            {
+                double P = m.LineTime * AutoRate;
+                int span = (int)Math.Ceiling(P * AutoLines * 1.002) + 64;
+                long from = _sdCount - span;
+                if (from < 0 || from * AutoDec < _lastEnd || span > _sd.Length) continue;
+                // prefix sums of the window
+                double[] cum = new double[span + 1];
+                for (int i = 0; i < span; i++) cum[i + 1] = cum[i] + _sd[(from + i) % _sd.Length];
+                int inner = Math.Max(2, (int)Math.Round((m.Sync * Rate - SyncWin) / AutoDec));
+                int per = (int)Math.Floor(P);
+                for (int ppm = -1000; ppm <= 1000; ppm += 200)
+                {
+                    double p = P * (1 + ppm * 1e-6);
+                    double[] tot = new double[per];
+                    for (int l = 0; l < AutoLines; l++)
+                    {
+                        int b = (int)Math.Round(l * p);
+                        for (int o = 0; o < per; o++)
+                        {
+                            int x = b + o;
+                            if (x + inner < span) tot[o] += (cum[x + inner] - cum[x]) / inner;
+                        }
+                    }
+                    int bo = 0;
+                    for (int o = 1; o < per; o++) if (tot[o] > tot[bo]) bo = o;
+                    double sc = tot[bo] / AutoLines;
+                    if (sc < 0.5) continue;
+                    int hits = 0;
+                    for (int l = 0; l < AutoLines; l++)
+                    {
+                        int x = (int)Math.Round(l * p) + bo;
+                        if (x + inner < span && (cum[x + inner] - cum[x]) / inner > 0.5) hits++;
+                    }
+                    if (hits >= 8 && (hits > bestHits || (hits == bestHits && sc > bestScore)))
+                    {
+                        best = m; bestScore = sc; bestHits = hits; bestPer = p * AutoDec; bestAt = (from + bo) * AutoDec - SyncWin;
+                    }
+                }
+            }
+            if (best == null) return;
+            // the first line's sync starts at bestAt (samples); start() takes where the line (Scottie: the picture) begins
+            long t0 = (long)Math.Round(bestAt - best.SyncOffset * Rate - (best.Family == SstvFamily.Scottie ? best.Sync * Rate : 0));
+            start(best, t0, 0);
+            _period = bestPer;
+            _pic.NoHeader = true;
+            _hunt = false;
+            Diag?.Invoke("no header: " + best.Name + " found from its line sync (" + bestHits + " of " + AutoLines + " lines), started from those lines");
+        }
 
         private void finish(bool cut)
         {
@@ -605,6 +786,8 @@ namespace Kainos.Sstv
             _idUntil = _idFrom + (long)(1.6 * Rate);
             _idFor = _pic;
             _visHold = 0;
+            _lastEnd = _n;
+            _autoHold = Math.Max(_autoHold, _n + 3L * Rate);
             if (cut) { _idFor = null; Finished?.Invoke(_pic); }
         }
 

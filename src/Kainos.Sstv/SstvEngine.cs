@@ -86,7 +86,7 @@ namespace Kainos.Sstv
             {
                 try
                 {
-                    if (_cut) { _cut = false; Decoder.Cut(); }
+                    if (_cut) { _cut = false; Decoder.Skip(); }
                     SstvMode sn = _startNow;
                     if (sn != null) { _startNow = null; Decoder.StartNow(sn); }
                     float[] pend = _pendingWave;
