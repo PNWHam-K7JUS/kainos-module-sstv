@@ -1,0 +1,49 @@
+# Kainos SSTV (slow-scan TV)
+
+A module for [Kainos](https://github.com/PNWHam-K7JUS/Kainos), the Hermes Lite 2 SDR program: SSTV pictures received inside Kainos, in the Kainos look, with no virtual audio cables or separate program.
+
+This first version receives. Sending comes next. It will have a first-run setup that asks for your station details once and makes ready-to-use CQ, reply and 73 templates from them, and a Reply button that answers in the sender's mode.
+
+- **Modes found automatically** from the VIS header: Martin M1 and M2, Scottie S1, S2 and DX, Robot 36, and PD-50, 90, 120, 160, 180, 240 and 290.
+- **The picture as it arrives**, line by line, scaled to fit the pane.
+- **Slant correction**: the sender's sound-card clock is measured from the sync pulses and the picture is redrawn straight when it ends.
+- **Off-tune signals** (up to about 150 Hz) are measured from the VIS leader and allowed for.
+- **Who sent it**: the callsign from MMSSTV's FSK ID, when the sender has it turned on (most do).
+- **Gallery** along the bottom, newest first. Click a picture to look at it, click the big picture to go back to live, and right-click one to open, copy, show in its folder or delete it (to the Recycle Bin). Pictures are saved as PNG in the module's data folder (**Pictures** opens it), each with a `.json` of its details: mode, callsign, time, frequency, tuning and slant.
+- **Tuning help**: the details column shows the 1000 to 2500 Hz audio with the sync (1200 Hz), black (1500 Hz) and white (2300 Hz) tones marked, and the panadapter shows the same tones as lines from the VFO.
+- **Band menu**: tunes to the usual SSTV frequencies (3.845 and 7.171 LSB; 14.230, 14.233, 21.340, 28.680 and 50.950 USB) and sets DIGL or DIGU.
+- **Skip** ends a picture early. Pictures cut short (signal lost, or Skip) are kept if a quarter or more came in (Options).
+- At 125 % or 150 % display scaling, the picture is drawn at the screen's own resolution (Options, "Sharp picture").
+
+## Installing
+
+In Kainos: **Setup > Modules**, choose **SSTV (slow-scan TV)** and **Install**. Then open it from **Modes > SSTV** (or the menu bar in Classic layout).
+
+To test a build before it's released, use **Install from file...** with the zip from `build.ps1`.
+
+The SSTV module and the RTTY / CW terminals and the Digital Modes module share the receiver's audio, one at a time. If another one takes it, the status line says so; click it to take it back.
+
+## How it works
+
+| Part | What it does |
+|---|---|
+| `SstvModes.cs` | The mode table: VIS codes, sync, porch and gap times, pixel times and line layouts. |
+| `SstvDecoder.cs` | Resamples to 24 kHz and finds the instantaneous frequency of every sample (mixed down from 1900 Hz, low-passed, phase difference). Finds the VIS header in 10 ms steps, then decodes each line once it is all in. It fits a straight line through the sync pulses for slant, redraws the whole picture at the end, then reads the FSK ID. |
+| `SstvEncoder.cs` | A picture to SSTV audio: VIS, lines and FSK ID. Used by the self-test now, and for sending next. |
+| `SstvEngine.cs` | The thread that takes the receiver's audio from Kainos and feeds the decoder, plus the tuning spectrum. |
+| `Gallery.cs` | Saving and listing received pictures. |
+| `UI/` | The pane, drawn in the Kainos colours. |
+
+## Building
+
+You need Visual Studio 2022 or later (.NET desktop development) and a Kainos build (for `Kainos.ModuleApi.dll`).
+
+```
+.\build.ps1
+```
+
+The self-test encodes a test picture in every mode and decodes it. It also decodes the modes used most with noise, a 70 Hz tuning error and a sender's clock 500 ppm fast, and checks the FSK ID. It runs the module's window with two pictures played to it. With `-PySstv <folder>` it also decodes pictures made by PySSTV, an independent encoder.
+
+## Licence
+
+GPL version 3 or later (see LICENSE). Copyright (C) 2026 Justin Cron K7JUS.

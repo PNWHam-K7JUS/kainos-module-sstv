@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="12.0" DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <Import Project="$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props" Condition="Exists('$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props')" />
+  <PropertyGroup>
+    <Configuration Condition=" '$(Configuration)' == '' ">Release</Configuration>
+    <Platform Condition=" '$(Platform)' == '' ">AnyCPU</Platform>
+    <ProjectGuid>{B4E81C27-5D9A-4F36-8E21-7A0C3D9F6B15}</ProjectGuid>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>Kainos.Sstv.SelfTest</RootNamespace>
+    <AssemblyName>Kainos.Sstv.SelfTest</AssemblyName>
+    <TargetFrameworkVersion>v4.8</TargetFrameworkVersion>
+    <LangVersion>7.3</LangVersion>
+    <DebugType>pdbonly</DebugType>
+    <Optimize>true</Optimize>
+    <Prefer32Bit>false</Prefer32Bit>
+    <OutputPath>bin\$(Configuration)\</OutputPath>
+    <KainosBin Condition=" '$(KainosBin)' == '' ">$(MSBuildThisFileDirectory)..\..\..\Kainos\Project Files\bin\x64\Release\</KainosBin>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="System" />
+    <Reference Include="System.Core" />
+    <Reference Include="System.Drawing" />
+    <Reference Include="System.Windows.Forms" />
+    <Reference Include="Kainos.ModuleApi">
+      <HintPath>$(KainosBin)Kainos.ModuleApi.dll</HintPath>
+    </Reference>
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="*.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Kainos.Sstv\Kainos.Sstv.csproj">
+      <Project>{6A2D9F41-8B3C-4E57-A1D0-3C7E9B5F2A64}</Project>
+      <Name>Kainos.Sstv</Name>
+    </ProjectReference>
+  </ItemGroup>
+  <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
+</Project>
