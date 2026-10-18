@@ -136,7 +136,7 @@ namespace Kainos.Sstv.SelfTest
                 SstvModule mod = new SstvModule();
                 Stopwatch sw = Stopwatch.StartNew();
                 TimeSpan firstAt = TimeSpan.Zero;
-                bool midShot = false;
+                bool midShot = false, takenAway = false;
                 Timer t = new Timer { Interval = 200 };
                 f.Shown += (s, e) =>
                 {
@@ -155,12 +155,14 @@ namespace Kainos.Sstv.SelfTest
                 {
                     if (count() >= 1 && firstAt == TimeSpan.Zero) firstAt = sw.Elapsed;
                     if (!midShot && firstAt != TimeSpan.Zero && sw.Elapsed - firstAt > TimeSpan.FromSeconds(5)) { midShot = true; shot(f, Path.Combine(work, "ui-receiving.png")); }
+                    if (takenAway) { t.Stop(); f.Close(); return; }
                     if ((count() >= 2 && h.AirEmpty) || sw.Elapsed > TimeSpan.FromSeconds(60))
                     {
-                        t.Stop();
                         timedOut = count() < 2;
                         shot(f, Path.Combine(work, "ui-done.png"));
-                        f.Close();
+                        // another digital mode (FT8, RTTY...) opens and takes the receiver's audio: SSTV closes
+                        h.TakeAway();
+                        takenAway = true;
                     }
                 };
                 Application.Run(f);
@@ -172,6 +174,7 @@ namespace Kainos.Sstv.SelfTest
             check(!timedOut && files.Length == 2 && files[0].Contains("_R36_K7JUS") && files[1].Contains("_M1_W1AW"),
                 "the window receives and keeps both pictures: " + string.Join(", ", files));
             check(File.Exists(Path.Combine(received, Path.ChangeExtension(files.FirstOrDefault() ?? "x", ".json"))), "each picture has its details beside it (.json)");
+            check(!h.Panes[0].IsOpen && !h.Menus[0].Checked && h.Acquires == 1, "closes when another digital mode takes the receiver's audio, and doesn't take it back");
             check(h.MarkerLog.Contains("0:1200,1500,2300"), "the SSTV tones marked on the panadapter (" + string.Join(" ", h.MarkerLog) + ")");
             check(h.LogLines.Any(l => l.StartsWith("received Martin M1 from W1AW")), "logged: " + h.LogLines.LastOrDefault());
             Console.WriteLine("      screenshots: " + Path.Combine(work, "ui-receiving.png") + ", ui-done.png");

@@ -68,7 +68,11 @@ namespace Kainos.Sstv.SelfTest
         public void Play(float[] a) { lock (_air) foreach (float s in a) _air.Enqueue(s); }
         public bool AirEmpty { get { lock (_air) return _air.Count == 0; } }
 
-        public bool AcquireRx(int rx, Action released, out string problem) { problem = null; _rxClock = System.Diagnostics.Stopwatch.StartNew(); _rxRead = 0; return true; }
+        // the stand-in for another digital mode (SSTV, RTTY...) taking the receiver's audio
+        private Action _released;
+        public int Acquires;
+        public void TakeAway() { Action a = _released; _released = null; if (a != null) a(); }
+        public bool AcquireRx(int rx, Action released, out string problem) { problem = null; _released = released; Acquires++; _rxClock = System.Diagnostics.Stopwatch.StartNew(); _rxRead = 0; return true; }
         public void ReleaseRx() { _rxClock = null; }
         public int RxRate { get { return 48000; } }
         public int ReadRx(float[] dst, int max)

@@ -162,7 +162,6 @@ namespace Kainos.Sstv.UI
             _gallery.Menu += (it, p) => itemMenu(it).Show(_gallery, p);
 
             _e.Status += s => _host.BeginInvoke(() => status(s));
-            _e.RxLost += () => _host.BeginInvoke(() => status("Another terminal or module took the receiver's audio. Click Listen (in the status line) or reopen SSTV."));
             _e.Decoder.Progress += p => _dirty = true;
             _e.Decoder.Finished += p => _host.BeginInvoke(() => finished(p));
             _e.SpectrumReady += () => _specDirty = true;
@@ -376,7 +375,7 @@ namespace Kainos.Sstv.UI
             {
                 double f = _host.Radio.VfoHz(_e.Rx);
                 string listen = !_host.Radio.PowerOn ? "Radio off" :
-                    _e.Lost ? "Not listening: another terminal or module has the audio (click here to take it back)" :
+                    _e.Lost ? "Not listening (click here to try again)" :
                     _e.Listening ? "Listening on RX" + (_e.Rx + 1) + "  " + (f / 1e6).ToString("0.000", CultureInfo.InvariantCulture) + " " + _host.Radio.Mode(_e.Rx) : "Starting...";
                 if (_e.Decoder.Receiving && _livePic != null) listen = "Receiving " + _livePic.Mode.Name + ", line " + _livePic.LinesDone + " of " + _livePic.Mode.Lines;
                 _statusText = listen;

@@ -21,7 +21,7 @@ In Kainos: **Setup > Modules**, choose **SSTV (slow-scan TV)** and **Install**. 
 
 To test a build before it's released, use **Install from file...** with the zip from `build.ps1`.
 
-The SSTV module and the RTTY / CW terminals and the Digital Modes module share the receiver's audio, one at a time. If another one takes it, the status line says so; click it to take it back.
+One digital mode is open at a time: SSTV, FT8 / FT4 (the Digital Modes module) and the RTTY and CW terminals share the receiver's audio. Opening one closes whichever had it.
 
 ## How it works
 

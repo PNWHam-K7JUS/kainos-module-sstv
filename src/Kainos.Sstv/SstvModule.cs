@@ -38,6 +38,13 @@ namespace Kainos.Sstv
             _pane = host.CreatePane("Kainos SSTV", _view);
             _pane.Closed += (s, e) => close();
             _view.PopToggled += () => _pane.Popped = !_pane.Popped;
+            // one digital mode at a time: when another (FT8, RTTY, CW...) takes the receiver's audio, this one closes
+            _engine.RxLost += () => host.BeginInvoke(() =>
+            {
+                if (!_pane.IsOpen) return;
+                host.Log("another digital mode took the receiver's audio: closing");
+                close();
+            });
             _menu = host.AddMenuItem("SSTV", "Slow-scan TV (the SSTV module): open / close.", () => { if (_pane.IsOpen) close(); else open(); });
             host.Log("SSTV " + ModuleVersion + " started");
             if (host.GetSetting("open", "0") == "1") open();
