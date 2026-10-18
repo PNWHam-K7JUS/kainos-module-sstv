@@ -56,6 +56,8 @@ namespace Kainos.Sstv.UI
             new[] { "15 m", "21340000", "USB" },
             new[] { "10 m", "28680000", "USB" },
             new[] { "6 m", "50950000", "USB" },
+            // the ISS's SSTV events (PD-120 / PD-180), on 2 m FM: with a transverter (Setup > XVTRs) or a VHF radio
+            new[] { "2 m ISS", "145800000", "FM" },
         };
 
         public SstvPane(IKainosHost host, SstvEngine engine)
@@ -194,11 +196,13 @@ namespace Kainos.Sstv.UI
             {
                 double f = double.Parse(b[1], CultureInfo.InvariantCulture);
                 string mode = b[2];
+                if (mode == "FM") m.Items.Add(new ToolStripSeparator());
                 ToolStripMenuItem it = new ToolStripMenuItem(b[0] + "   " + (f / 1e6).ToString("0.000", CultureInfo.InvariantCulture) + " " + mode) { Checked = Math.Abs(dial - f) < 500 };
+                if (mode == "FM") it.ToolTipText = "The ISS sends SSTV (usually PD-120 or PD-180) on 145.800 FM during its events (ARISS). Needs a 2 m transverter (Setup > XVTRs) or a VHF radio; Doppler is no trouble on FM.";
                 it.Click += (s, e) =>
                 {
-                    // DIGU / DIGL: the audio straight through, as for the other digital modes
-                    _host.Radio.SetMode(_e.Rx, mode == "LSB" ? "DIGL" : "DIGU");
+                    // DIGU / DIGL: the audio straight through, as for the other digital modes; FM for the ISS
+                    _host.Radio.SetMode(_e.Rx, mode == "FM" ? "FM" : mode == "LSB" ? "DIGL" : "DIGU");
                     _host.Radio.TuneVfo(_e.Rx, f);
                     _markersFor = "";
                 };
@@ -250,6 +254,8 @@ namespace Kainos.Sstv.UI
             };
             check("Keep pictures that were cut short", "savecut", "1", "Save a picture that ended early (signal lost, or Skip) if a quarter or more of it came in");
             check("Show the SSTV tones on the panadapter", "markers", "1", "Lines at sync (1200 Hz), black (1500 Hz) and white (2300 Hz) from the VFO, to tune by");
+            check("Log window after sending a 73", "log73", "1", "Open Log QSO, filled in, when your 73 picture has gone out");
+            check("Send logged QSOs to logging programs", "udp.on", "1", "As WSJT-X does (UDP \"Logged ADIF\"), for Log4OM, N1MM+, HRD, DXKeeper and GridTracker");
             check("Sharp picture on high-DPI screens", "crisp", "1", "Draw the picture at the screen's own resolution at 125 % / 150 % scaling (takes effect when Kainos restarts)");
             m.Items.Add(new ToolStripSeparator());
             m.Items.Add(levelMenu());
@@ -263,6 +269,12 @@ namespace Kainos.Sstv.UI
             ToolStripMenuItem rec = new ToolStripMenuItem("Save the last 3 minutes of audio") { ToolTipText = "A WAV of what the module heard, for checking a signal that didn't decode" };
             rec.Click += (s, e) => saveAudio();
             m.Items.Add(rec);
+            ToolStripMenuItem addr = new ToolStripMenuItem("Logging programs address...");
+            addr.Click += (s, e) => loggerAddress();
+            m.Items.Add(addr);
+            ToolStripMenuItem logf = new ToolStripMenuItem("Open the log folder");
+            logf.Click += (s, e) => Process.Start("explorer.exe", "/select,\"" + SstvLog.FileOf(_host.DataFolder) + "\"");
+            m.Items.Add(logf);
             ToolStripMenuItem open = new ToolStripMenuItem("Open the pictures folder");
             open.Click += (s, e) => openFolder();
             m.Items.Add(open);
@@ -356,7 +368,7 @@ namespace Kainos.Sstv.UI
             _saved = b;
             _savedItem = it;
             // a reply goes to this picture's sender, in its mode
-            receivedFrom(it.Call, SstvModes.All.FirstOrDefault(m => m.Name == it.Mode));
+            receivedFrom(it.Call, SstvModes.All.FirstOrDefault(m => m.Name == it.Mode), it.Utc);
             _view.Image = b;
             _view.Caption = it.Caption + "   (click to go back to live)";
             _view.Progress = -1;
@@ -372,7 +384,7 @@ namespace Kainos.Sstv.UI
         private void finished(SstvPicture p)
         {
             bool complete = p.LinesDone >= p.Mode.Lines - 2;
-            receivedFrom(p.Callsign, p.Mode);
+            receivedFrom(p.Callsign, p.Mode, p.StartUtc);
             bool keep = complete || (_host.GetSetting("savecut", "1") == "1" && p.LinesDone >= p.Mode.Lines / 4);
             if (p == _livePic && _live != null)
             {
@@ -416,6 +428,7 @@ namespace Kainos.Sstv.UI
                 row("Saved", "");
                 row("Mode", _savedItem.Mode);
                 row("From", _savedItem.Call.Length > 0 ? _savedItem.Call : "(no FSK ID)");
+                if (workedText(_savedItem.Call).Length > 0) row("Worked", workedText(_savedItem.Call));
                 row("Time", _savedItem.Utc.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture) + "Z");
                 string json = "";
                 try { json = File.ReadAllText(Path.ChangeExtension(_savedItem.Path, ".json")); } catch { }
@@ -431,6 +444,7 @@ namespace Kainos.Sstv.UI
                 row(p.Complete ? "Last" : "Receiving", "");
                 row("Mode", p.Mode.Name);
                 row("From", p.Callsign.Length > 0 ? p.Callsign : p.Complete ? "(no FSK ID)" : "(at the end)");
+                if (workedText(p.Callsign).Length > 0) row("Worked", workedText(p.Callsign));
                 row("Started", p.StartUtc.ToString("HH:mm:ss", CultureInfo.InvariantCulture) + "Z");
                 row("Lines", p.LinesDone + " of " + p.Mode.Lines);
                 row("Tuning", p.FreqShift.ToString("+0;-0;0", CultureInfo.InvariantCulture) + " Hz");

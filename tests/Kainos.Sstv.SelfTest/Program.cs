@@ -357,6 +357,9 @@ namespace Kainos.Sstv.SelfTest
             string received = Path.Combine(data, "Received");
             Func<int> count = () => Directory.Exists(received) ? Directory.GetFiles(received, "*.png").Length : 0;
             bool timedOut = false;
+            System.Net.Sockets.UdpClient logger = new System.Net.Sockets.UdpClient(new System.Net.IPEndPoint(System.Net.IPAddress.Loopback, 0));
+            h.Settings["udp"] = "127.0.0.1:" + ((System.Net.IPEndPoint)logger.Client.LocalEndPoint).Port;
+            bool logged = false;
             SstvMode replyMode = null;
             Bitmap replyPic = null;
             string toBox = "";
@@ -401,7 +404,14 @@ namespace Kainos.Sstv.SelfTest
                     }
                     if (replied && !txShot && h.Mox && h.TxAudio.Count > 48000 * 30) { txShot = true; shot(f, Path.Combine(work, "ui-sending.png")); }
                     bool sentAll = replied && h.TxAudio.Count > 0 && !h.Mox && sw.Elapsed > firstAt + TimeSpan.FromSeconds(8);
-                    if (sentAll || sw.Elapsed > TimeSpan.FromSeconds(120))
+                    if (sentAll && !logged)
+                    {
+                        // the QSO logged (as the Log QSO window's Log button does)
+                        logged = true;
+                        pane.LogQso(new SstvQso { Call = "W1AW", RstSent = "595", RstRcvd = "575", PictureMode = "Martin M1", DialHz = 14230000, On = DateTime.UtcNow.AddMinutes(-5), Off = DateTime.UtcNow });
+                        return;
+                    }
+                    if ((sentAll && logged) || sw.Elapsed > TimeSpan.FromSeconds(120))
                     {
                         timedOut = count() < 2;
                         shot(f, Path.Combine(work, "ui-sent.png"));
@@ -430,6 +440,24 @@ namespace Kainos.Sstv.SelfTest
                 back.Mode.Name + ", FSK ID \"" + back.Callsign + "\", PSNR " + rp.ToString("0.0") + " dB against the picture shown"));
             if (replyPic != null) { replyPic.Save(Path.Combine(work, "ui-reply.png"), ImageFormat.Png); if (back != null) Save(back, Path.Combine(work, "ui-reply-decoded.png")); replyPic.Dispose(); }
             check(!h.Mox, "the radio is un-keyed after sending");
+            // what the logging program got: WSJT-X's Logged ADIF message (magic, schema 3, type 12, id, ADIF)
+            string got = "";
+            try
+            {
+                logger.Client.ReceiveTimeout = 2000;
+                System.Net.IPEndPoint from = null;
+                byte[] pkt = logger.Receive(ref from);
+                Func<int, uint> u32 = o => (uint)(pkt[o] << 24 | pkt[o + 1] << 16 | pkt[o + 2] << 8 | pkt[o + 3]);
+                int idLen = (int)u32(12);
+                string id = System.Text.Encoding.UTF8.GetString(pkt, 16, idLen);
+                int adLen = (int)u32(16 + idLen);
+                string adif = System.Text.Encoding.UTF8.GetString(pkt, 20 + idLen, adLen);
+                got = (u32(0) == 0xadbccbda && u32(4) == 3 && u32(8) == 12 ? "ok " : "bad header ") + id + ": " + adif.Replace("\n", " ");
+            }
+            catch (Exception ex) { got = ex.Message; }
+            finally { logger.Close(); }
+            check(got.StartsWith("ok Kainos SSTV") && got.Contains("<CALL:4>W1AW") && got.Contains("<MODE:4>SSTV"), "the logged QSO reaches a logging program (WSJT-X UDP): " + got);
+            check(File.Exists(SstvLog.FileOf(data)) && File.ReadAllText(SstvLog.FileOf(data)).Contains("<CALL:4>W1AW"), "and is in kainos-sstv.adi");
             check(!h.Panes[0].IsOpen && !h.Menus[0].Checked && h.Acquires == 1, "closes when another digital mode takes the receiver's audio, and doesn't take it back");
             check(h.MarkerLog.Contains("0:1200,1500,2300"), "the SSTV tones marked on the panadapter (" + string.Join(" ", h.MarkerLog) + ")");
             check(h.LogLines.Any(l => l.StartsWith("received Martin M1 from W1AW")), "logged: " + h.LogLines.LastOrDefault());
@@ -448,6 +476,18 @@ namespace Kainos.Sstv.SelfTest
             string cqLines = SstvTemplate.Fill(d[0].Lines, st, tf), reTitle = SstvTemplate.Fill(d[1].Title, st, tf), seventy = SstvTemplate.Fill(d[2].Lines, st, tf);
             check(cqLines == "Justin  \u00b7  Seattle WA  \u00b7  CN87\nHermes Lite 2  \u00b7  5 W\nPSE K" && reTitle == "W1AW de K7JUS" && seventy.Contains("2026-10-18  20:15Z  \u00b7  Martin M1"),
                 "placeholders filled, and an empty one (antenna) leaves no stray separator: " + cqLines.Replace("\n", " | "));
+            // the log: an ADIF record, and worked-before read back from the file
+            SstvQso q1 = new SstvQso { Call = "w1aw", RstSent = "595", RstRcvd = "575", PictureMode = "Martin M1", DialHz = 14230000, Name = "Hiram",
+                On = new DateTime(2026, 10, 18, 20, 10, 0, DateTimeKind.Utc), Off = new DateTime(2026, 10, 18, 20, 16, 30, DateTimeKind.Utc), Comment = "nice pic" };
+            string adifRec = SstvLog.Record(q1, "K7JUS", "CN87");
+            string logf = SstvLog.FileOf(data);
+            SstvLog.Append(logf, q1, "K7JUS", "CN87");
+            SstvLog.Append(logf, new SstvQso { Call = "W1AW", On = new DateTime(2026, 10, 19, 1, 0, 0, DateTimeKind.Utc), Off = new DateTime(2026, 10, 19, 1, 5, 0, DateTimeKind.Utc) }, "K7JUS", "CN87");
+            Dictionary<string, KeyValuePair<int, string>> wk = SstvLog.Worked(logf);
+            check(adifRec.Contains("<CALL:4>W1AW") && adifRec.Contains("<MODE:4>SSTV") && adifRec.Contains("<BAND:3>20M") && adifRec.Contains("<FREQ:9>14.230000") && adifRec.Contains("<TIME_ON:6>201000")
+                  && adifRec.Contains("<TIME_OFF:6>201630") && adifRec.Contains("<COMMENT:19>Martin M1. nice pic") && adifRec.Contains("<RST_RCVD:3>575") && adifRec.EndsWith("<EOR>"),
+                "an SSTV QSO in ADIF: " + adifRec);
+            check(wk.ContainsKey("w1aw") && wk["W1AW"].Key == 2 && wk["W1AW"].Value == "20261019", "worked before, from the log: " + (wk.ContainsKey("W1AW") ? wk["W1AW"].Key + " QSOs, last " + wk["W1AW"].Value : "none"));
             TemplateStore.Save(h, d);
             List<SstvTemplate> back = TemplateStore.Load(h);
             check(back.Count == 3 && back[1].Inset && back[1].Title == d[1].Title && back[2].Lines == d[2].Lines, "templates saved and read back (" + back.Count + ")");
@@ -470,6 +510,11 @@ namespace Kainos.Sstv.SelfTest
             {
                 f.Show(); Application.DoEvents(); System.Threading.Thread.Sleep(400); Application.DoEvents();
                 shot(f, Path.Combine(work, "form-editor.png")); f.Close();
+            }
+            using (UI.LogQsoForm f = new UI.LogQsoForm(h, q1) { StartPosition = FormStartPosition.Manual, Location = new Point(-3000, 0) })
+            {
+                f.Show(); Application.DoEvents(); System.Threading.Thread.Sleep(300); Application.DoEvents();
+                shot(f, Path.Combine(work, "form-log.png")); f.Close();
             }
             Console.WriteLine("      pictures: " + Path.Combine(work, "tpl-*.png") + ", form-setup.png, form-editor.png");
         }

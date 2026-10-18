@@ -21,7 +21,10 @@ namespace Kainos.Sstv.UI
     internal partial class SstvPane
     {
         private TextBox _to;
-        private KButton _rst, _cq, _reply, _73, _more, _txMode, _send, _halt, _tune;
+        private KButton _rst, _cq, _reply, _73, _more, _log, _txMode, _send, _halt, _tune;
+        private string _qsoCall = "";           // the QSO under way: who, and since when (for the log)
+        private DateTime _qsoStart;
+        private Dictionary<string, KeyValuePair<int, string>> _worked = new Dictionary<string, KeyValuePair<int, string>>();
         private Label _toLabel;
 
         private SstvTemplate _pvTemplate;       // what's shown ready to send, or null
@@ -57,6 +60,7 @@ namespace Kainos.Sstv.UI
             _reply = btn("Reply", "Show your reply to the last picture received (or the one picked in the gallery), in their mode");
             _73 = btn("73", "Show your 73 picture, ready to send");
             _more = btn("More", "Your other pictures, editing them, and your station's details");
+            _log = btn("Log", "Log the QSO with the station in To (also opens by itself after your 73 has been sent)");
             _txMode = btn("Mode: Auto", "The mode to send in. Auto: CQs in your mode (Options > Station setup), replies and 73s in the mode the other station used");
             _send = btn("Send", "Transmit the picture shown");
             _halt = btn("Stop", "Stop transmitting now");
@@ -67,6 +71,8 @@ namespace Kainos.Sstv.UI
             _reply.Click += (s, e) => previewKind("reply");
             _73.Click += (s, e) => previewKind("73");
             _more.Click += (s, e) => moreMenu().Show(_more, new Point(0, _more.Height));
+            _log.Click += (s, e) => openLog();
+            _worked = SstvLog.Worked(SstvLog.FileOf(_host.DataFolder));
             _txMode.Click += (s, e) => txModeMenu().Show(_txMode, new Point(0, _txMode.Height));
             _send.Click += (s, e) => send();
             _halt.Click += (s, e) => _e.Halt();
@@ -89,7 +95,7 @@ namespace Kainos.Sstv.UI
             int pad = _t.S(4), x = pad;
             Action<Control, int> place = (c, w) => { c.SetBounds(x, y, _t.S(w), bh); x += _t.S(w) + pad; };
             place(_toLabel, 22); place(_to, 100); place(_rst, 48); x += pad;
-            place(_cq, 44); place(_reply, 56); place(_73, 40); place(_more, 56);
+            place(_cq, 44); place(_reply, 56); place(_73, 40); place(_more, 56); x += pad; place(_log, 44);
             int right = Width - pad;
             _tune.SetBounds(right - _t.S(52), y, _t.S(52), bh); right -= _t.S(52) + pad;
             _halt.SetBounds(right - _t.S(52), y, _t.S(52), bh); right -= _t.S(52) + pad;
@@ -195,6 +201,9 @@ namespace Kainos.Sstv.UI
                     _txProgress = 0;
                     _view.ProgressColor = _t.Tx;
                     _view.Caption = "Sending: " + name + (_to.Text.Trim().Length > 0 && _pvTemplate.Kind != "cq" ? " to " + _to.Text.Trim() : "") + ", " + m.Name + "   (Stop ends it)";
+                    // the QSO starts with the first picture to (or from) them
+                    string to = _to.Text.Trim();
+                    if (_pvTemplate.Kind != "cq" && to.Length > 0 && !string.Equals(to, _qsoCall, StringComparison.OrdinalIgnoreCase)) { _qsoCall = to; _qsoStart = DateTime.UtcNow; }
                     _host.Log("sending " + name + (_to.Text.Length > 0 ? " to " + _to.Text : "") + " in " + m.Name + (fsk != null ? ", FSK ID " + fsk : ""));
                     status("Sending " + name + " in " + m.Name);
                     refreshSendBar();
@@ -211,6 +220,8 @@ namespace Kainos.Sstv.UI
             if (_pvTemplate != null)
             {
                 status(done ? "Sent " + _pvTemplate.Name + " in " + _pvMode.Name : "Stopped sending");
+                // the 73 is out: the QSO is over, log it
+                if (done && _pvTemplate.Kind == "73" && _to.Text.Trim().Length > 0 && _host.GetSetting("log73", "1") == "1") _host.BeginInvoke(openLog);
                 _view.Caption = (done ? "Sent: " : "Stopped: ") + _pvTemplate.Name + ", " + _pvMode.Name + "   (Send again, or click to go back to live)";
             }
             else status(done ? "Tune ended" : "Tune stopped");
@@ -235,12 +246,75 @@ namespace Kainos.Sstv.UI
         }
 
         // a picture came in: their callsign and mode for the reply
-        private void receivedFrom(string call, SstvMode m)
+        private void receivedFrom(string call, SstvMode m, DateTime when)
         {
             if (m != null) _theirMode = m;
             if (string.IsNullOrEmpty(call)) return;
+            if (!string.Equals(call, _qsoCall, StringComparison.OrdinalIgnoreCase)) { _qsoCall = call; _qsoStart = when; }
             string cur = _to.Text.Trim();
             if (cur.Length == 0 || cur == _autoTo) { _to.Text = call; _autoTo = call; }
+        }
+
+        // ---- the log ----
+
+        internal void openLog()
+        {
+            string call = _to.Text.Trim();
+            if (call.Length == 0) { status("Who to log? Their callsign goes in To"); _to.Focus(); return; }
+            StationProfile st = profile();
+            bool same = string.Equals(call, _qsoCall, StringComparison.OrdinalIgnoreCase) && _qsoStart > DateTime.MinValue;
+            SstvQso q = new SstvQso
+            {
+                Call = call, RstSent = _rstValue, On = same ? _qsoStart : DateTime.UtcNow, Off = DateTime.UtcNow,
+                DialHz = _host.Radio.VfoHz(_e.Rx), Power = st.Pwr,
+                PictureMode = (_pvMode != null && _pvTemplate != null && _pvTemplate.Kind != "cq" ? _pvMode : _theirMode ?? st.CqMode).Name,
+            };
+            using (LogQsoForm f = new LogQsoForm(_host, q))
+            {
+                if (f.ShowDialog(FindForm()) != DialogResult.OK || f.Qso == null) return;
+                LogQso(f.Qso);
+            }
+        }
+
+        // writes the QSO to the log and tells the logging programs
+        internal void LogQso(SstvQso q)
+        {
+            StationProfile st = profile();
+            try
+            {
+                string rec = SstvLog.Append(SstvLog.FileOf(_host.DataFolder), q, st.Call, st.Grid);
+                _host.Log("logged " + q.Call + " " + q.PictureMode);
+                string told = "";
+                if (_host.GetSetting("udp.on", "1") == "1")
+                {
+                    string why = SstvLog.TellLoggers(_host.GetSetting("udp", "127.0.0.1:2237"), rec);
+                    told = why == null ? ", and sent to your logging program" : " (couldn't tell the logging program: " + why + ")";
+                }
+                _worked = SstvLog.Worked(SstvLog.FileOf(_host.DataFolder));
+                _qsoCall = "";
+                status("Logged " + q.Call + told);
+                showDetails();
+            }
+            catch (Exception ex) { status("Couldn't log it: " + ex.Message); }
+        }
+
+        // "worked before" for the details column: "" if not
+        private string workedText(string call)
+        {
+            KeyValuePair<int, string> w;
+            if (string.IsNullOrEmpty(call) || !_worked.TryGetValue(call, out w)) return "";
+            string d = w.Value != null && w.Value.Length == 8 ? w.Value.Substring(0, 4) + "-" + w.Value.Substring(4, 2) + "-" + w.Value.Substring(6, 2) : "";
+            return w.Key + (w.Key == 1 ? " QSO" : " QSOs") + (d.Length > 0 ? ", last " + d : "");
+        }
+
+        private void loggerAddress()
+        {
+            string cur = _host.GetSetting("udp", "127.0.0.1:2237");
+            string v = Microsoft.VisualBasic.Interaction.InputBox("Where logged QSOs are sent, as WSJT-X sends them (UDP host:port). Log4OM, N1MM+, HRD, DXKeeper (via JTAlert) and GridTracker listen on 127.0.0.1:2237 unless set otherwise.", "SSTV: logging programs", cur);
+            if (string.IsNullOrWhiteSpace(v) || v == cur) return;
+            if (!SstvLog.ValidAddress(v)) { status("Not changed: the address should be host:port, e.g. 127.0.0.1:2237"); return; }
+            _host.SetSetting("udp", v.Trim());
+            status("Logged QSOs go to " + v.Trim());
         }
 
         // ---- menus ----

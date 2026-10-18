@@ -20,7 +20,7 @@ A module for [Kainos](https://github.com/PNWHam-K7JUS/Kainos), the Hermes Lite 2
 - **Who sent it**: the callsign from MMSSTV's FSK ID, when the sender has it turned on (most do).
 - **Gallery** along the bottom, newest first. Click a picture to look at it, click the big picture to go back to live, and right-click one to open, copy, show in its folder or delete it (to the Recycle Bin). Pictures are saved as PNG in the module's data folder (**Pictures** opens it), each with a `.json` of its details: mode, callsign, time, frequency, tuning and slant.
 - **What's being heard**, even before a picture starts: the details column has a scrolling waterfall (the last 40 s) and a spectrum of 900 to 2500 Hz, with the sync (1200 Hz), black (1500 Hz), leader (1900 Hz) and white (2300 Hz) tones marked, and an input level meter (says "no audio", "very low" or "clipping" when it should). The panadapter shows the same tones as lines from the VFO.
-- **Band menu**: tunes to the usual SSTV frequencies (3.845 and 7.171 LSB; 14.230, 14.233, 21.340, 28.680 and 50.950 USB) and sets DIGL or DIGU.
+- **Band menu**: tunes to the usual SSTV frequencies (3.845 and 7.171 LSB; 14.230, 14.233, 21.340, 28.680 and 50.950 USB) and sets DIGL or DIGU. **2 m ISS** (145.800 FM) is there for the ISS's SSTV events (PD-120 / PD-180), with a 2 m transverter or a VHF radio.
 - **Options > Save the last 3 minutes of audio** writes a WAV of what the module heard, for a signal that didn't decode. The self-test decodes one with `Kainos.Sstv.SelfTest.exe --wav <file>` and says what it found and why it turned down any header it nearly took. Those near misses are also in the module's log and, briefly, in the status line.
 - **Skip** ends a picture early. Pictures cut short (signal lost, or Skip) are kept if a quarter or more came in (Options).
 - At 125 % or 150 % display scaling, the picture is drawn at the screen's own resolution (Options, "Sharp picture").
@@ -33,6 +33,12 @@ To test a build before it's released, use **Install from file...** with the zip 
 
 One digital mode is open at a time: SSTV, FT8 / FT4 (the Digital Modes module) and the RTTY and CW terminals share the receiver's audio. Opening one closes whichever had it.
 
+## Logging
+
+- **Log** (on the send bar) opens Log QSO filled in: their callsign, the reports, start (the first picture to or from them) and end, frequency, picture mode and your power. It also opens by itself when your 73 has gone out (Options to turn off).
+- QSOs go in `kainos-sstv.adi` (Options > Open the log folder) as ADIF mode SSTV, with the picture mode in the comment, and are sent to your logging program as WSJT-X sends them (UDP "Logged ADIF" to 127.0.0.1:2237; Options > Logging programs address...). Log4OM, N1MM+, HRD, DXKeeper (via JTAlert) and GridTracker take them.
+- **Worked before**: when a picture arrives from a station in the log, the details column shows how many QSOs and the last date.
+
 ## How it works
 
 | Part | What it does |
@@ -42,6 +48,7 @@ One digital mode is open at a time: SSTV, FT8 / FT4 (the Digital Modes module) a
 | `SstvEncoder.cs` | A picture to SSTV audio: VIS, lines and FSK ID. Used by the self-test now, and for sending next. |
 | `SstvEngine.cs` | The thread that takes the receiver's audio from Kainos and feeds the decoder, plus the tuning spectrum. |
 | `Gallery.cs` | Saving and listing received pictures. |
+| `SstvLog.cs` | The ADIF log, worked before, and the UDP message to logging programs. |
 | `Station.cs`, `TemplateRenderer.cs` | The station's details, the picture templates (DataFolder	emplates.json) and drawing them. |
 | `SstvEngine.cs` (transmit) | Sending: the audio fed to Kainos's transmit tap with MOX, as the Digital Modes module does. |
 | `UI/` | The pane, drawn in the Kainos colours. |
