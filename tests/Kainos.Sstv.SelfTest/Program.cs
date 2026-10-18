@@ -38,6 +38,8 @@ namespace Kainos.Sstv.SelfTest
             string work = Path.Combine(Path.GetTempPath(), "kainos-sstv-selftest");
             Directory.CreateDirectory(work);
             bool keep = args.Contains("--keep");
+            int wi = Array.IndexOf(args, "--wav");
+            if (wi >= 0 && wi + 1 < args.Length) return DecodeWav(args[wi + 1], work);
             using (Bitmap test = TestPicture())
             {
                 test.Save(Path.Combine(work, "test.png"), ImageFormat.Png);
@@ -75,9 +77,58 @@ namespace Kainos.Sstv.SelfTest
                     }
                 }
 
+                // 2b. headers found in noise as on HF: SNR in a 3 kHz bandwidth (signal 0.5 peak; noise sigma s at 48 kHz)
+                {
+                    SstvMode m = SstvModes.ByShort("M1");
+                    List<KeyValuePair<double, double>> tones = SstvEncoder.Tones(m, SstvEncoder.Pixels(test, m), null);
+                    float[] head = SstvEncoder.Audio(tones, 48000).Take(48000 * 2).ToArray();        // the header and a little picture
+                    foreach (double sigma in new[] { 0.5, 1.0, 1.41, 2.0 })
+                    {
+                        int found = 0, tries = 8;
+                        for (int k = 0; k < tries; k++) if (starts(head, 48000, sigma) > 0) found++;
+                        double snr = 10 * Math.Log10(0.125 / (sigma * sigma * 3000 / 24000));
+                        bool need = snr >= -0.5;         // must be dependable down to 0 dB; below is a bonus
+                        check(!need || found >= tries - 1, "header found at " + snr.ToString("0") + " dB SNR (3 kHz): " + found + " of " + tries);
+                    }
+                }
+
+                // 2c. a picture whose header was missed: Start now, part way in
+                {
+                    SstvMode m = SstvModes.ByShort("M1");
+                    float[] a = SstvEncoder.Encode(test, m, 48000);
+                    int skip = (int)((0.9 + 30.3 * m.LineTime) * 48000);       // the header and 30 lines gone, mid-line
+                    float[] rest = a.Skip(skip).ToArray();
+                    SstvDecoder d = new SstvDecoder();
+                    SstvPicture done = null;
+                    d.Finished += pp => done = pp;
+                    int chunk = 960, fed = 0;
+                    float[] buf = new float[chunk];
+                    for (int i = 0; i < rest.Length + 48000 * 7; i += chunk)        // and 7 s after, for the end to be noticed
+                    {
+                        for (int j = 0; j < chunk; j++) buf[j] = (float)((i + j < rest.Length ? rest[i + j] * 0.5 : 0) + Gauss() * 0.05);
+                        d.Push(buf, chunk, 48000);
+                        fed += chunk;
+                        if (fed == chunk * 100) d.StartNow(m);      // 2 s in
+                    }
+                    // the decoded rows are the sent ones from some line on: find which, and compare
+                    byte[,,] want = SstvEncoder.Pixels(test, m);
+                    double bestPsnr = 0; int bestOff = -1;
+                    if (done != null)
+                        for (int off = 0; off < 60; off++)
+                        {
+                            double se = 0; int n = 0;
+                            for (int y = 4; y + off < m.Lines && y < done.LinesDone - 4; y++)
+                                for (int x = 6; x < m.Width - 6; x++)
+                                    for (int c = 0; c < 3; c++) { double dd = want[y + off, x, c] - done.Rgb[(y * m.Width + x) * 3 + c]; se += dd * dd; n++; }
+                            double ps = n == 0 ? 0 : 10 * Math.Log10(255.0 * 255 / Math.Max(1e-9, se / n));
+                            if (ps > bestPsnr) { bestPsnr = ps; bestOff = off; }
+                        }
+                    check(done != null && bestPsnr > 26, "Start now without a header: " + (done == null ? "no picture" : "PSNR " + bestPsnr.ToString("0.0") + " dB from sent line " + bestOff + ", " + done.LinesDone + " lines"));
+                }
+
                 // 3. nothing from noise alone
                 {
-                    float[] noise = new float[48000 * 20];
+                    float[] noise = new float[48000 * 60];
                     for (int i = 0; i < noise.Length; i++) noise[i] = (float)(Gauss() * 0.3);
                     int started = 0;
                     SstvDecoder d = new SstvDecoder();
@@ -96,6 +147,60 @@ namespace Kainos.Sstv.SelfTest
             }
             Console.WriteLine(_fail == 0 ? "All passed" : _fail + " failed");
             return _fail == 0 ? 0 : 1;
+        }
+
+        // how many pictures start from this audio (with noise), and 1 s of noise first
+        private static int starts(float[] audio, int rate, double noise)
+        {
+            SstvDecoder d = new SstvDecoder();
+            int n = 0;
+            d.Started += _ => n++;
+            int chunk = rate / 50;
+            float[] buf = new float[chunk];
+            int total = audio.Length + rate;
+            for (int i = 0; i < total; i += chunk)
+            {
+                for (int j = 0; j < chunk; j++)
+                {
+                    int k = i + j - rate;
+                    buf[j] = (float)((k >= 0 && k < audio.Length ? audio[k] * 0.5 : 0) + Gauss() * noise);
+                }
+                d.Push(buf, chunk, rate);
+            }
+            return n;
+        }
+
+        // a recording (Options > Save the last 3 minutes of audio) through the decoder: what it found, and why not
+        private static int DecodeWav(string path, string work)
+        {
+            int rate;
+            float[] a = ReadWav(path, out rate);
+            Console.WriteLine(Path.GetFileName(path) + ": " + (a.Length / (double)rate).ToString("0.0") + " s at " + rate + " Hz, peak " + a.Select(Math.Abs).DefaultIfEmpty(0).Max().ToString("0.000"));
+            SstvDecoder d = new SstvDecoder();
+            double t = 0;
+            d.Diag += s => Console.WriteLine("  " + t.ToString("0.0").PadLeft(6) + " s  " + s);
+            d.Started += p => Console.WriteLine("  " + t.ToString("0.0").PadLeft(6) + " s  START " + p.Mode.Name + ", tuning " + p.FreqShift.ToString("+0;-0;0") + " Hz");
+            int pics = 0;
+            d.Finished += p =>
+            {
+                string png = Path.Combine(work, "wav-" + (++pics) + "-" + p.Mode.Short + ".png");
+                Save(p, png);
+                Console.WriteLine("  " + t.ToString("0.0").PadLeft(6) + " s  END " + p.Mode.Name + " " + p.LinesDone + " lines, slant " + p.SlantPpm.ToString("0") + " ppm, FSK ID \"" + p.Callsign + "\" -> " + png);
+            };
+            int chunk = rate / 50;
+            float[] buf = new float[chunk];
+            for (int i = 0; i < a.Length; i += chunk)
+            {
+                int n = Math.Min(chunk, a.Length - i);
+                Array.Copy(a, i, buf, 0, n);
+                t = i / (double)rate;
+                d.Push(buf, n, rate);
+            }
+            // 8 s of silence after: time for the last picture to end (and its FSK ID to be looked for)
+            Array.Clear(buf, 0, chunk);
+            for (int i = 0; i < 8 * 50; i++) { t += 0.02; d.Push(buf, chunk, rate); }
+            Console.WriteLine(pics + " picture(s)" + (d.Unknown >= 0 ? "; last unknown VIS 0x" + d.Unknown.ToString("X2") : ""));
+            return 0;
         }
 
         // the audio through the decoder in 20 ms pieces, with 2 s of (noisy) silence either side

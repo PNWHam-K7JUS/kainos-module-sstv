@@ -4,7 +4,8 @@ A module for [Kainos](https://github.com/PNWHam-K7JUS/Kainos), the Hermes Lite 2
 
 This first version receives. Sending comes next. It will have a first-run setup that asks for your station details once and makes ready-to-use CQ, reply and 73 templates from them, and a Reply button that answers in the sender's mode.
 
-- **Modes found automatically** from the VIS header: Martin M1 and M2, Scottie S1, S2 and DX, Robot 36, and PD-50, 90, 120, 160, 180, 240 and 290.
+- **Modes found automatically** from the VIS header: Martin M1 and M2, Scottie S1, S2 and DX, Robot 36, and PD-50, 90, 120, 160, 180, 240 and 290. The header is found from the strongest tone in each 10 ms, as slowrx does, so weak signals start too: in the self-test, dependably down to 0 dB SNR in a 3 kHz bandwidth, and mostly at -6 dB.
+- **Start** begins a picture now in a mode you pick, for when its header was missed (QRM, or you tuned in part way). The line timing is found from the sync pulses.
 - **The picture as it arrives**, line by line, scaled to fit the pane.
 - **Slant correction**: the sender's sound-card clock is measured from the sync pulses and the picture is redrawn straight when it ends.
 - **Off-tune signals** (up to about 150 Hz) are measured from the VIS leader and allowed for.
@@ -12,6 +13,7 @@ This first version receives. Sending comes next. It will have a first-run setup 
 - **Gallery** along the bottom, newest first. Click a picture to look at it, click the big picture to go back to live, and right-click one to open, copy, show in its folder or delete it (to the Recycle Bin). Pictures are saved as PNG in the module's data folder (**Pictures** opens it), each with a `.json` of its details: mode, callsign, time, frequency, tuning and slant.
 - **Tuning help**: the details column shows the 1000 to 2500 Hz audio with the sync (1200 Hz), black (1500 Hz) and white (2300 Hz) tones marked, and the panadapter shows the same tones as lines from the VFO.
 - **Band menu**: tunes to the usual SSTV frequencies (3.845 and 7.171 LSB; 14.230, 14.233, 21.340, 28.680 and 50.950 USB) and sets DIGL or DIGU.
+- **Options > Save the last 3 minutes of audio** writes a WAV of what the module heard, for a signal that didn't decode. The self-test decodes one with `Kainos.Sstv.SelfTest.exe --wav <file>` and says what it found and why it turned down any header it nearly took. Those near misses are also in the module's log and, briefly, in the status line.
 - **Skip** ends a picture early. Pictures cut short (signal lost, or Skip) are kept if a quarter or more came in (Options).
 - At 125 % or 150 % display scaling, the picture is drawn at the screen's own resolution (Options, "Sharp picture").
 

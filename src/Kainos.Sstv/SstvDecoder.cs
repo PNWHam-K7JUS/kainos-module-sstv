@@ -91,6 +91,7 @@ namespace Kainos.Sstv
 
         private void sample(float s)
         {
+            _raw[_n % _raw.Length] = s;
             double c = Math.Cos(_mixPhase), sn = Math.Sin(_mixPhase);
             _mixPhase += 2 * Math.PI * Fmix / Rate;
             if (_mixPhase > 2 * Math.PI) _mixPhase -= 2 * Math.PI;
@@ -106,7 +107,7 @@ namespace Kainos.Sstv
             double f = Fmix + Math.Atan2(im, re) * Rate / (2 * Math.PI);
             _freq[_n % Cap] = (float)Math.Max(800, Math.Min(2800, f));
             _n++;
-            block(f);
+            if (++_bcount == Block) { _bcount = 0; block(); }
         }
 
         // the filter delays everything by half its length: times are corrected by this many samples
@@ -126,20 +127,74 @@ namespace Kainos.Sstv
         // ---- 2. VIS ----
 
         private const int Block = Rate / 100;           // 10 ms
-        private double _bsum;
         private int _bcount;
+
+        // the header is found from the strongest tone in each 10 ms step (a 20 ms window, 900 - 2200 Hz), as slowrx does:
+        // far steadier in noise than the instantaneous frequency, which breaks up below about 10 dB SNR
+        private const int Win = Rate / 50;              // 20 ms
+        private const double PkLo = 900, PkStep = 10;
+        private const int PkBins = 131;                 // 900 - 2200 Hz
+        private readonly float[] _raw = new float[Rate * 3];     // the last 3 s of audio, sample n at n % length
+        private float R(long n) { return n < 0 || n >= _n || n <= _n - _raw.Length ? 0f : _raw[n % _raw.Length]; }
+        private static readonly float[] PkCos = new float[PkBins * Win], PkSin = new float[PkBins * Win];
+
+        static SstvDecoder()
+        {
+            for (int b = 0; b < PkBins; b++)
+                for (int i = 0; i < Win; i++)
+                {
+                    double w = 0.5 - 0.5 * Math.Cos(2 * Math.PI * (i + 0.5) / Win);
+                    double ph = 2 * Math.PI * (PkLo + b * PkStep) * i / Rate;
+                    PkCos[b * Win + i] = (float)(w * Math.Cos(ph));
+                    PkSin[b * Win + i] = (float)(w * Math.Sin(ph));
+                }
+        }
+
+        // the strongest tone over the 20 ms ending `back` samples ago
+        private double peak(int back)
+        {
+            float[] x = new float[Win];
+            long start = _n - back - Win;
+            for (int i = 0; i < Win; i++) x[i] = R(start + i);
+            double[] p = new double[PkBins];
+            int best = 0;
+            for (int b = 0; b < PkBins; b++)
+            {
+                double re = 0, im = 0;
+                int o = b * Win;
+                for (int i = 0; i < Win; i++) { re += x[i] * PkCos[o + i]; im += x[i] * PkSin[o + i]; }
+                p[b] = re * re + im * im;
+                if (p[b] > p[best]) best = b;
+            }
+            double off = 0;
+            if (best > 0 && best < PkBins - 1)
+            {
+                double a = p[best - 1], c = p[best + 1], m = p[best], den = a - 2 * m + c;
+                if (Math.Abs(den) > 1e-20) off = Math.Max(-0.5, Math.Min(0.5, 0.5 * (a - c) / den));
+            }
+            return PkLo + (best + off) * PkStep;
+        }
         private readonly double[] _blocks = new double[128];
         private long _blockCount;
         private long _visHold;                          // no new header until this sample (inside a header just found)
 
-        private void block(double f)
+        // each 10 ms block's tone: the 20 ms window centred on the block before the newest (so it's whole), which makes
+        // the block series run one block (10 ms) behind the samples
+        private void block()
         {
-            _bsum += f; _bcount++;
-            if (_bcount < Block) return;
-            _blocks[_blockCount % _blocks.Length] = _bsum / _bcount;
+            _blocks[_blockCount % _blocks.Length] = peak(Block / 2);
             _blockCount++;
-            _bsum = 0; _bcount = 0;
             if (_n > _visHold) visCheck();
+        }
+
+        // why a header that looked likely was turned down (for the module's log), at most every 2 s
+        public event Action<string> Diag;
+        private long _diagAt = long.MinValue;
+        private void nearMiss(string why)
+        {
+            if (Diag == null || _n - _diagAt < 2 * Rate) return;
+            _diagAt = _n;
+            Diag(why);
         }
 
         // the block k back from the newest (0 = newest)
@@ -147,7 +202,7 @@ namespace Kainos.Sstv
 
         private void visCheck()
         {
-            if (_blockCount < 95) return;
+            if (_blockCount < 60) return;               // the checks below look back 58 blocks
             // newest first: stop bit 0-2, parity 3-5, bit 6 at 6-8 ... bit 0 at 24-26, start bit 27-29,
             // leader 30-59, break 60, leader 61-90
             List<double> lead = new List<double>();
@@ -157,23 +212,37 @@ namespace Kainos.Sstv
             if (Math.Abs(shift) > 150) return;
             if (lead.Count(x => Math.Abs(x - L) < 60) < lead.Count * 0.8) return;
             Func<int, double> mid = k => B(k + 1) - shift;          // the middle of a 30 ms bit starting k blocks back
-            if (Math.Abs(mid(27) - SstvModes.FSync) > 80 || Math.Abs(mid(0) - SstvModes.FSync) > 80) return;
+            if (Math.Abs(mid(27) - SstvModes.FSync) > 80 || Math.Abs(mid(0) - SstvModes.FSync) > 80)
+            {
+                // a leader then something near 1200 Hz: probably a header, worth a line in the log
+                if (Math.Abs(mid(27) - SstvModes.FSync) < 160)
+                    nearMiss("header? leader " + L.ToString("0") + " Hz, start bit " + (mid(27) + shift).ToString("0") + " Hz, stop bit " + (mid(0) + shift).ToString("0") + " Hz");
+                return;
+            }
             int code = 0, ones = 0;
+            string bits = "";
             for (int bit = 0; bit < 7; bit++)
             {
                 double f = mid(24 - 3 * bit);
-                if (Math.Abs(f - SstvModes.FBit1) > 90 && Math.Abs(f - SstvModes.FBit0) > 90) return;
+                bits += (f + shift).ToString("0") + " ";
+                if (Math.Abs(f - SstvModes.FBit1) > 90 && Math.Abs(f - SstvModes.FBit0) > 90) { nearMiss("header: bit " + bit + " unclear (" + bits.Trim() + " Hz, tuning " + shift.ToString("+0;-0") + ")"); return; }
                 if (f < (SstvModes.FBit1 + SstvModes.FBit0) / 2) { code |= 1 << bit; ones++; }
             }
             double pf = mid(3);
-            if (Math.Abs(pf - SstvModes.FBit1) > 90 && Math.Abs(pf - SstvModes.FBit0) > 90) return;
+            if (Math.Abs(pf - SstvModes.FBit1) > 90 && Math.Abs(pf - SstvModes.FBit0) > 90) { nearMiss("header: parity bit unclear (" + (pf + shift).ToString("0") + " Hz)"); return; }
             int parity = pf < 1200 ? 1 : 0;
-            if (parity != ones % 2) return;
+            if (parity != ones % 2) { nearMiss("header: parity wrong (code 0x" + code.ToString("X2") + ", bits " + bits.Trim() + " Hz)"); return; }
             SstvMode mode = SstvModes.ByVis(code);
-            if (mode == null) { _visHold = _n + Rate / 2; Unknown = code; return; }
+            if (mode == null)
+            {
+                _visHold = _n + Rate / 2;
+                Unknown = code;
+                Diag?.Invoke("header for VIS code 0x" + code.ToString("X2") + ": not a mode this module receives yet");
+                return;
+            }
 
             // the leader-to-start-bit edge, to the sample: about 300 ms before the stop bit's end
-            long approxEdge = _n - delay - (long)(0.300 * Rate);
+            long approxEdge = _n - delay - (long)(0.310 * Rate);     // blocks run 10 ms behind (block())
             long edge = approxEdge;
             double best = double.MaxValue;
             double half = (SstvModes.FLeader + SstvModes.FSync) / 2 + shift;
@@ -208,6 +277,7 @@ namespace Kainos.Sstv
 
         private void start(SstvMode m, long t0, double shift)
         {
+            _hunt = false;
             if (_pic != null && !_pic.Complete) finish(true);
             _pic = new SstvPicture { Mode = m, Rgb = new byte[m.Width * m.Lines * 3], FreqShift = shift, StartUtc = Now() };
             _t0 = t0 + (m.Family == SstvFamily.Scottie ? (long)Math.Round(m.Sync * Rate) : 0);
@@ -234,6 +304,7 @@ namespace Kainos.Sstv
                 // a line can be decoded once all of it (and a little more, for its sync) is in
                 double end = _phase + (_nextLine + 1) * _period + 0.02 * Rate + delay;
                 if (_n < end) break;
+                if (_hunt) { hunt(); continue; }
                 findSync(_nextLine);
                 refit(false);
                 drawLine(_nextLine);
@@ -390,6 +461,36 @@ namespace Kainos.Sstv
         private long _idFrom = -1, _idUntil;
         private SstvPicture _idFor;
 
+        // starts a picture in a mode now, without a header (missed, or tuned in part way): the line timing is found by
+        // looking for the sync pulse across the first whole line
+        public void StartNow(SstvMode m)
+        {
+            long back = (long)(m.LineTime * Rate);
+            start(m, Math.Max(0, _n - delay - back), 0);
+            _hunt = true;
+        }
+        private bool _hunt;
+
+        // the strongest sync-length stretch below 1350 Hz over one line from the picture's start: line 0's sync
+        private void hunt()
+        {
+            _hunt = false;
+            SstvMode m = _pic.Mode;
+            int len = (int)Math.Round(m.Sync * Rate), per = (int)Math.Round(_period);
+            double thr = 1350;
+            long a0 = _t0 + delay;
+            int count = 0, best = -1, bestAt = 0;
+            for (int j = 0; j < len; j++) if (F(a0 + j) < thr) count++;
+            for (int o = 0; o < per; o++)
+            {
+                if (o > 0) { if (F(a0 + o - 1) < thr) count--; if (F(a0 + o - 1 + len) < thr) count++; }
+                if (count > best) { best = count; bestAt = o; }
+            }
+            _phase = _t0 + bestAt;
+            _t0 = (long)(_phase - m.SyncOffset * Rate);
+            _visHold = _n + (long)(m.Duration * Rate);
+        }
+
         // ends the picture being received where it is (the Skip button)
         public void Cut() { finish(true); }
 
@@ -418,29 +519,53 @@ namespace Kainos.Sstv
         }
 
         // MMSSTV's FSK ID between from and to (samples): 22 ms bits, 1900 Hz = 1, 2100 Hz = 0, 6 bits a byte least
-        // significant first: 0x20 0x2A, the callsign (each character less 0x20), 0x01
+        // significant first: 0x20 0x2A, the callsign (each character less 0x20), 0x01. Each bit is the stronger of the
+        // two tones over its middle (narrowband, so it holds up in noise); the bit timing is the one where the
+        // preamble comes out clearest.
         internal string FskId(long from, long to)
         {
-            double bit = 0.022 * Rate, thr = 2000 + _shift;
+            double bit = 0.022 * Rate;
             int[] pre = { 0, 0, 0, 0, 0, 1, 0, 1, 0, 1, 0, 1 };     // 0x20, 0x2A least significant first
+            double f1 = 1900 + _shift, f0 = 2100 + _shift;
+            // a bit's (energy at 1900) - (energy at 2100), normalised: > 0 is a 1
+            Func<double, double> margin = st =>
+            {
+                long a = (long)(st + bit * 0.15), b = (long)(st + bit * 0.85);
+                double e1 = tone(a, b, f1), e0 = tone(a, b, f0);
+                return (e1 - e0) / (e1 + e0 + 1e-20);
+            };
+            double bestScore = 0, bestAt = -1;
             for (double o = from; o + bit * 20 < to; o += Rate * 0.001)
             {
-                Func<int, int> b = j => meanF(o + j * bit + bit * 0.2, o + (j + 1) * bit - bit * 0.2) < thr ? 1 : 0;
-                bool ok = true;
-                for (int j = 0; j < 12 && ok; j++) ok = b(j) == pre[j];
-                if (!ok) continue;
-                string call = "";
-                for (int c = 0; c < 12; c++)
+                double worst = double.MaxValue;
+                for (int j = 0; j < 12; j++)
                 {
-                    int v = 0;
-                    for (int j = 0; j < 6; j++) v |= b(12 + c * 6 + j) << j;
-                    if (v == 0x01) return call.Length >= 3 ? call : null;
-                    char ch = (char)(v + 0x20);
-                    if (!(char.IsLetterOrDigit(ch) || ch == '/')) break;
-                    call += ch;
+                    double m = margin(o + j * bit) * (pre[j] == 1 ? 1 : -1);
+                    if (m < worst) worst = m;
+                    if (worst <= 0) break;
                 }
+                if (worst > bestScore) { bestScore = worst; bestAt = o; }
+            }
+            if (bestAt < 0) return null;
+            string call = "";
+            for (int c = 0; c < 12; c++)
+            {
+                int v = 0;
+                for (int j = 0; j < 6; j++) if (margin(bestAt + (12 + c * 6 + j) * bit) > 0) v |= 1 << j;
+                if (v == 0x01) return call.Length >= 3 ? call : null;
+                char ch = (char)(v + 0x20);
+                if (!(char.IsLetterOrDigit(ch) || ch == '/')) return null;
+                call += ch;
             }
             return null;
+        }
+
+        // the energy of a tone over samples a to b of the raw audio (Goertzel)
+        private double tone(long a, long b, double hz)
+        {
+            double k = 2 * Math.Cos(2 * Math.PI * hz / Rate), s1 = 0, s2 = 0;
+            for (long n = a; n < b; n++) { double s0 = R(n) + k * s1 - s2; s2 = s1; s1 = s0; }
+            return s1 * s1 + s2 * s2 - k * s1 * s2;
         }
     }
 

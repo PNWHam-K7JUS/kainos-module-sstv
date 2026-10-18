@@ -25,7 +25,7 @@ namespace Kainos.Sstv.UI
         private readonly SstvEngine _e;
         private readonly string _folder;
 
-        private readonly KButton _band, _rxSel, _skip, _openFolder, _pop, _options;
+        private readonly KButton _band, _rxSel, _startBtn, _skip, _openFolder, _pop, _options;
         private readonly Label _status;
         private readonly PictureView _view;
         private readonly KainosCrispHost _viewHost;
@@ -75,6 +75,7 @@ namespace Kainos.Sstv.UI
             };
             _band = btn("Band", "Tune to a band's SSTV frequency (14.230 USB, 7.171 LSB...)");
             _rxSel = btn("RX1", "The receiver listened to: RX1 or RX2");
+            _startBtn = btn("Start", "Start a picture now in a mode you pick, for when its header was missed (weak, or you tuned in part way). Normally the mode is found by itself.");
             _skip = btn("Skip", "End the picture being received now (it's kept if a quarter or more came in)");
             _openFolder = btn("Pictures", "Open the folder the received pictures are saved in");
             _pop = btn("Pop out", "Docked under the panadapter, or in its own window");
@@ -124,7 +125,7 @@ namespace Kainos.Sstv.UI
             int pad = _t.S(4), bh = _t.S(24), x = pad, y = pad;
             Action<Control, int> place = (c, w) => { c.SetBounds(x, y, _t.S(w), bh); x += _t.S(w) + pad; };
             place(_band, 64); place(_rxSel, 44); x += pad;
-            place(_skip, 52); place(_openFolder, 70);
+            place(_startBtn, 52); place(_skip, 52); place(_openFolder, 70);
             int right = Width - pad;
             _options.SetBounds(right - _t.S(64), y, _t.S(64), bh); right -= _t.S(64) + pad;
             _pop.SetBounds(right - _t.S(64), y, _t.S(64), bh); right -= _t.S(64) + pad;
@@ -154,6 +155,7 @@ namespace Kainos.Sstv.UI
                 _host.SetMarkers(1 - _e.Rx, null);
             };
             _skip.Click += (s, e) => _e.Cut();
+            _startBtn.Click += (s, e) => startMenu().Show(_startBtn, new Point(0, _startBtn.Height));
             _openFolder.Click += (s, e) => openFolder();
             _pop.Click += (s, e) => PopToggled?.Invoke();
             _options.Click += (s, e) => optionsMenu().Show(_options, new Point(0, _options.Height));
@@ -165,6 +167,8 @@ namespace Kainos.Sstv.UI
             _e.Decoder.Progress += p => _dirty = true;
             _e.Decoder.Finished += p => _host.BeginInvoke(() => finished(p));
             _e.SpectrumReady += () => _specDirty = true;
+            // headers that nearly passed: in the log, and briefly in the status line
+            _e.Decoder.Diag += d => { _host.Log("vis: " + d); _host.BeginInvoke(() => status("Heard what may be a " + d)); };
             _status.Click += (s, e) => { if (_e.Lost) { _e.Listen(); status("Listening again"); } };
         }
 
@@ -192,6 +196,36 @@ namespace Kainos.Sstv.UI
             return m;
         }
 
+        private ContextMenuStrip startMenu()
+        {
+            ContextMenuStrip m = new ContextMenuStrip();
+            foreach (SstvMode mode in SstvModes.All)
+            {
+                SstvMode mm = mode;
+                ToolStripMenuItem it = new ToolStripMenuItem(mode.Name);
+                it.Click += (s, e) => { _e.StartNow(mm); status("Starting " + mm.Name + " now: looking for its line sync"); };
+                m.Items.Add(it);
+            }
+            m.Closed += (s, e) => BeginInvoke(new Action(m.Dispose));
+            return m;
+        }
+
+        private void saveAudio()
+        {
+            try
+            {
+                string dir = Path.Combine(_host.DataFolder, "Recordings");
+                Directory.CreateDirectory(dir);
+                string path = Path.Combine(dir, DateTime.UtcNow.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture) + "Z_" +
+                    (_host.Radio.VfoHz(_e.Rx) / 1e3).ToString("0", CultureInfo.InvariantCulture) + "kHz_" + _host.Radio.Mode(_e.Rx) + ".wav");
+                double sec = _e.SaveRecording(path);
+                if (sec <= 0) { status("Nothing heard yet to save"); return; }
+                status("Saved the last " + sec.ToString("0") + " s of audio: " + Path.GetFileName(path));
+                Process.Start("explorer.exe", "/select,\"" + path + "\"");
+            }
+            catch (Exception ex) { status("Couldn't save the audio: " + ex.Message); }
+        }
+
         private ContextMenuStrip optionsMenu()
         {
             ContextMenuStrip m = new ContextMenuStrip();
@@ -206,6 +240,9 @@ namespace Kainos.Sstv.UI
             check("Show the SSTV tones on the panadapter", "markers", "1", "Lines at sync (1200 Hz), black (1500 Hz) and white (2300 Hz) from the VFO, to tune by");
             check("Sharp picture on high-DPI screens", "crisp", "1", "Draw the picture at the screen's own resolution at 125 % / 150 % scaling (takes effect when Kainos restarts)");
             m.Items.Add(new ToolStripSeparator());
+            ToolStripMenuItem rec = new ToolStripMenuItem("Save the last 3 minutes of audio") { ToolTipText = "A WAV of what the module heard, for checking a signal that didn't decode" };
+            rec.Click += (s, e) => saveAudio();
+            m.Items.Add(rec);
             ToolStripMenuItem open = new ToolStripMenuItem("Open the pictures folder");
             open.Click += (s, e) => openFolder();
             m.Items.Add(open);
