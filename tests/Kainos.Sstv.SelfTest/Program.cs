@@ -106,7 +106,7 @@ namespace Kainos.Sstv.SelfTest
                     d.Finished += pp => done = pp;
                     int chunk = 960, fed = 0;
                     float[] buf = new float[chunk];
-                    for (int i = 0; i < rest.Length + 48000 * 12; i += chunk)       // and 12 s after, for the end to be noticed
+                    for (int i = 0; i < rest.Length + 48000 * 20; i += chunk)       // and 20 s after: it runs a whole picture's length from where it started
                     {
                         for (int j = 0; j < chunk; j++) buf[j] = (float)((i + j < rest.Length ? rest[i + j] * 0.5 : 0) + Gauss() * 0.05);
                         d.Push(buf, chunk, 48000);
@@ -175,6 +175,37 @@ namespace Kainos.Sstv.SelfTest
                         "a header mid-picture starts the new picture: " + string.Join(", ", got.Select(p => p.Mode.Short + " " + p.LinesDone + " lines")));
                 }
 
+                // 2g. strong signals beside the SSTV one in the passband (a busy band)
+                foreach (string ms in new[] { "M1", "S2" })
+                {
+                    SstvMode m = SstvModes.ByShort(ms);
+                    SstvPicture p = DecodeWithQrm(m, test, 9);
+                    double psnr = p != null ? Psnr(SstvEncoder.Pixels(test, m), p) : 0;
+                    check(p != null && p.LinesDone >= m.Lines - 2 && psnr > 14, m.Name + " at 9 dB beside two strong carriers (700 and 2900 Hz): " +
+                        (p == null ? "no picture" : p.LinesDone + "/" + m.Lines + " lines, PSNR " + psnr.ToString("0.0")));
+                    if (keep && p != null) Save(p, Path.Combine(work, "qrm-" + m.Short + ".png"));
+                }
+
+                // 2h. a fade part way through (HF QSB): the picture carries on to its end, and is clear again after
+                {
+                    SstvMode m = SstvModes.ByShort("M1");
+                    float[] a = SstvEncoder.Audio(SstvEncoder.Tones(m, SstvEncoder.Pixels(test, m), "K7JUS"), 48000);
+                    int f0 = (int)(a.Length * 0.3), f1 = (int)(a.Length * 0.5);
+                    for (int i = f0; i < f1; i++) a[i] *= 0.02f;            // 34 dB down for 20% of the picture
+                    SstvPicture p = decode(a, 48000, 0.1);
+                    double psnr = 0;
+                    if (p != null)
+                    {
+                        // the last third, after the fade
+                        byte[,,] want = SstvEncoder.Pixels(test, m);
+                        double se = 0; int n = 0;
+                        for (int y = m.Lines * 2 / 3; y < m.Lines - 4; y++) for (int x = 6; x < m.Width - 6; x++) for (int c = 0; c < 3; c++) { double d = want[y, x, c] - p.Rgb[(y * m.Width + x) * 3 + c]; se += d * d; n++; }
+                        psnr = 10 * Math.Log10(255.0 * 255 / Math.Max(1e-9, se / n));
+                    }
+                    check(p != null && p.LinesDone >= m.Lines - 2 && psnr > 24, "a deep fade part way through: runs to the end, clear after (" +
+                        (p == null ? "no picture" : p.LinesDone + " lines, PSNR after the fade " + psnr.ToString("0.0")) + ")");
+                }
+
                 // 3. nothing from noise alone
                 {
                     float[] noise = new float[48000 * 60];
@@ -214,6 +245,22 @@ namespace Kainos.Sstv.SelfTest
                     if (p != null) Save(p, Path.Combine(work, "sweep-" + m.Short + "-" + snr.ToString("0") + "dB.png"));
                 }
             }
+        }
+
+        // a picture with a strong signal beside it in the passband (as on a busy band): an SSB-like carrier at 700 Hz and
+        // another at 2900 Hz, each twice the SSTV signal's level, with band noise for the given SNR
+        internal static SstvPicture DecodeWithQrm(SstvMode m, Bitmap test, double snr)
+        {
+            float[] a = SstvEncoder.Audio(SstvEncoder.Tones(m, SstvEncoder.Pixels(test, m), "K7JUS"), 48000);
+            float[] q = new float[a.Length];
+            for (int i = 0; i < q.Length; i++)
+            {
+                double t = i / 48000.0;
+                // the carriers wobble a little, as voice would
+                q[i] = (float)(a[i] + 2 * Math.Sin(2 * Math.PI * (700 * t + 3 * Math.Sin(2 * Math.PI * 0.7 * t))) + 2 * Math.Sin(2 * Math.PI * (2900 * t + 5 * Math.Sin(2 * Math.PI * 0.4 * t))));
+            }
+            double sigma = Math.Sqrt(0.125 / Math.Pow(10, snr / 10) * 24000 / 3000);
+            return decode(q, 48000, sigma);
         }
 
         // how many pictures start from this audio (with noise), and 1 s of noise first

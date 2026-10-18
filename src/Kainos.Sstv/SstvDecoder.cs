@@ -56,25 +56,35 @@ namespace Kainos.Sstv
         private readonly double[] _hi, _hq;
         private int _hp;
         private double _mixPhase, _prevI = 1, _prevQ;
-        private const double Fmix = 1900;
+        private const double Fmix = 1750;              // the middle of the SSTV band (sync 1200 to white 2300)
 
         public SstvDecoder()
         {
-            // 1.4 kHz cut-off: wide enough for the shortest pixels (PD-120, 0.19 ms), narrow enough to keep noise down
-            int taps = 49;
-            double fc = 1400.0 / Rate;
+            // Only the SSTV band reaches the frequency measurement: mixed down from 1750 Hz, low-passed at 750 Hz (1000 -
+            // 2500 Hz passes) and 60 dB down by 1150 Hz (below 600 Hz and above 2900 Hz). Another signal in the passband
+            // (an SSB station, a carrier) would otherwise take over the measurement and turn the picture to noise: FM
+            // capture. Kaiser window, beta 5.65 (60 dB), 241 taps (5 ms delay, corrected for by `delay`).
+            int taps = 241;
+            double fc = 750.0 / Rate, beta = 5.65;
             _lp = new double[taps];
             double sum = 0;
             for (int i = 0; i < taps; i++)
             {
-                double x = i - (taps - 1) / 2.0;
-                double w = 0.42 - 0.5 * Math.Cos(2 * Math.PI * i / (taps - 1)) + 0.08 * Math.Cos(4 * Math.PI * i / (taps - 1));
+                double x = i - (taps - 1) / 2.0, rr = 2.0 * i / (taps - 1) - 1;
+                double w = besselI0(beta * Math.Sqrt(1 - rr * rr)) / besselI0(beta);
                 _lp[i] = (x == 0 ? 2 * fc : Math.Sin(2 * Math.PI * fc * x) / (Math.PI * x)) * w;
                 sum += _lp[i];
             }
             for (int i = 0; i < taps; i++) _lp[i] /= sum;
             _hi = new double[taps];
             _hq = new double[taps];
+        }
+
+        private static double besselI0(double x)
+        {
+            double sum = 1, term = 1;
+            for (int k = 1; k < 40; k++) { term *= (x / (2 * k)) * (x / (2 * k)); sum += term; if (term < 1e-12 * sum) break; }
+            return sum;
         }
 
         public long Samples { get { return _n; } }
@@ -358,8 +368,8 @@ namespace Kainos.Sstv
                     _nextLine = 0;
                     continue;
                 }
-                // the signal is gone: fewer than 3 syncs on the line timing in the last 20 lines
-                if (_nextLine >= 20 && tracked(_nextLine - 20, _nextLine) < 3) { finish(true); return; }
+                // Once a picture is confirmed, it runs to its end on the line timing even if the signal fades (as MMSSTV
+                // does): fading on HF comes back, and Skip or a new header ends it sooner.
             }
             if (drew) Progress?.Invoke(_pic);
             if (_nextLine >= m.RadioLines) finish(false);
