@@ -250,13 +250,20 @@ namespace Kainos.Sstv.UI
         protected override void OnMouseEnter(EventArgs e) { Focus(); base.OnMouseEnter(e); }
     }
 
-    // What's known about the picture, and the tones as they're heard (for tuning)
+    // What's known about the picture, and what's being heard: a waterfall and spectrum of 900 - 2500 Hz with the SSTV
+    // tones marked (sync 1200, black 1500, leader 1900, white 2300), and the input level
     internal class DetailsView : Control
     {
         private readonly IKainosTheme _t;
         public readonly List<KeyValuePair<string, string>> Rows = new List<KeyValuePair<string, string>>();
-        public float[] Spectrum;
         public double Shift;            // the last picture's mistuning, drawn as a marker
+        public float PeakDb = -120;     // input level (dB below full scale)
+
+        private const int WfLines = 400;                // 40 s at 10 lines a second
+        private Bitmap _wf;
+        private int _wfRow, _wfCount;                   // the newest line's row; lines held
+        private float[] _last;
+        private float _floor = float.NaN;
 
         public DetailsView(IKainosTheme t)
         {
@@ -265,12 +272,56 @@ namespace Kainos.Sstv.UI
             BackColor = t.Panel;
         }
 
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing && _wf != null) { _wf.Dispose(); _wf = null; }
+            base.Dispose(disposing);
+        }
+
+        // a spectrum line (dB per bin, SstvEngine's bins): onto the top of the waterfall
+        public void AddLine(float[] db)
+        {
+            int w = db.Length;
+            if (_wf == null || _wf.Width != w) { if (_wf != null) _wf.Dispose(); _wf = new Bitmap(w, WfLines, System.Drawing.Imaging.PixelFormat.Format32bppRgb); _wfCount = 0; }
+            _last = db;
+            // the noise floor: the line's 20th percentile, followed slowly
+            float[] sorted = (float[])db.Clone();
+            Array.Sort(sorted);
+            float f = sorted[w / 5];
+            _floor = float.IsNaN(_floor) ? f : _floor + 0.1f * (f - _floor);
+            _wfRow = (_wfRow - 1 + WfLines) % WfLines;
+            _wfCount = Math.Min(WfLines, _wfCount + 1);
+            int[] row = new int[w];
+            for (int i = 0; i < w; i++) row[i] = colour((db[i] - _floor - 3) / 32f).ToArgb();
+            System.Drawing.Imaging.BitmapData bd = _wf.LockBits(new Rectangle(0, _wfRow, w, 1), System.Drawing.Imaging.ImageLockMode.WriteOnly, System.Drawing.Imaging.PixelFormat.Format32bppRgb);
+            System.Runtime.InteropServices.Marshal.Copy(row, 0, bd.Scan0, w);
+            _wf.UnlockBits(bd);
+        }
+
+        // 0 (noise) to 1 (strong): navy, blue, ice, gold, white
+        private Color colour(float v)
+        {
+            v = Math.Max(0, Math.Min(1, v));
+            Color[] stops = { _t.Bg, Color.FromArgb(0x16, 0x3a, 0x5c), _t.Ice, _t.Gold, Color.White };
+            float p = v * (stops.Length - 1);
+            int i = Math.Min(stops.Length - 2, (int)p);
+            float fr = p - i;
+            Color a = stops[i], b = stops[i + 1];
+            return Color.FromArgb((int)(a.R + (b.R - a.R) * fr), (int)(a.G + (b.G - a.G) * fr), (int)(a.B + (b.B - a.B) * fr));
+        }
+
         protected override void OnPaint(PaintEventArgs e)
         {
             Graphics g = e.Graphics;
             g.Clear(_t.Panel);
             g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
             int pad = _t.S(8), rh = _t.S(19), y = pad;
+            // from the bottom up: the level meter, the tone labels, the spectrum, then the waterfall up to the rows
+            int levelH = _t.S(14), labelH = _t.S(13), specH = _t.S(30), minWf = _t.S(36);
+            Rectangle lr = new Rectangle(pad, Height - pad - levelH, Width - 2 * pad, levelH);
+            Rectangle sr = new Rectangle(pad, lr.Top - _t.S(6) - labelH - specH, Width - 2 * pad, specH);
+            int rowsBottom = sr.Top - minWf - _t.S(4);
+
             using (Font kf = _t.Font(_t.S(10), false))
             using (Font vf = _t.Font(_t.S(12), true))
             using (Brush kb = new SolidBrush(_t.Dim))
@@ -280,41 +331,42 @@ namespace Kainos.Sstv.UI
                 int kw = _t.S(62);
                 foreach (KeyValuePair<string, string> r in Rows)
                 {
-                    if (y + rh > Height - _t.S(70)) break;
+                    if (y + rh > rowsBottom) break;
                     g.DrawString(r.Key.ToUpperInvariant(), kf, kb, new RectangleF(pad, y + _t.S(3), kw, rh), sf);
                     g.DrawString(r.Value, vf, vb, new RectangleF(pad + kw, y, Width - 2 * pad - kw, rh), sf);
                     y += rh;
                 }
             }
-
-            // the tuning spectrum: 1000 - 2500 Hz, with sync (1200), black (1500), leader (1900) and white (2300)
-            Rectangle sr = new Rectangle(pad, Height - _t.S(62), Width - 2 * pad, _t.S(40));
             if (sr.Width < 20 || sr.Top < pad) return;
-            using (Brush bg = new SolidBrush(_t.Bg)) g.FillRectangle(bg, sr);
+            Rectangle wr = new Rectangle(pad, y + _t.S(4), sr.Width, Math.Max(0, sr.Top - 2 - y - _t.S(4)));
             Func<double, float> xOf = hz => sr.Left + (float)((hz - SstvEngine.SpecLo) / (SstvEngine.SpecHi - SstvEngine.SpecLo) * sr.Width);
-            using (Font f = _t.Font(_t.S(9), false))
-            using (Brush lb = new SolidBrush(_t.Faint))
-            using (Pen tick = new Pen(_t.Line))
+            double[] tones = { 1200, 1500, 1900, 2300 };
+
+            // the waterfall, newest at the top, one line a pixel
+            using (Brush bg = new SolidBrush(_t.Bg)) { g.FillRectangle(bg, wr); g.FillRectangle(bg, sr); }
+            if (_wf != null && wr.Height > 0 && _wfCount > 0)
             {
-                foreach (double hz in new double[] { 1200, 1500, 1900, 2300 })
-                {
-                    float x = xOf(hz);
-                    g.DrawLine(tick, x, sr.Top, x, sr.Bottom);
-                    string label = hz == 1200 ? "sync" : hz == 1500 ? "black" : hz == 1900 ? "1900" : "white";
-                    SizeF sz = g.MeasureString(label, f);
-                    g.DrawString(label, f, lb, x - sz.Width / 2, sr.Bottom + 1);
-                }
+                g.InterpolationMode = InterpolationMode.NearestNeighbor;
+                g.PixelOffsetMode = PixelOffsetMode.Half;
+                int vis = Math.Min(wr.Height, _wfCount);
+                int a = Math.Min(vis, WfLines - _wfRow);
+                g.DrawImage(_wf, new Rectangle(wr.Left, wr.Top, wr.Width, a), new Rectangle(0, _wfRow, _wf.Width, a), GraphicsUnit.Pixel);
+                if (vis > a) g.DrawImage(_wf, new Rectangle(wr.Left, wr.Top + a, wr.Width, vis - a), new Rectangle(0, 0, _wf.Width, vis - a), GraphicsUnit.Pixel);
+                g.PixelOffsetMode = PixelOffsetMode.Default;
             }
-            float[] s = Spectrum;
-            if (s != null && s.Length > 1)
+            using (Pen tick = new Pen(Color.FromArgb(90, _t.Dim)) { DashStyle = DashStyle.Dot })
+                foreach (double hz in tones) g.DrawLine(tick, xOf(hz), wr.Top, xOf(hz), wr.Bottom);
+
+            // the spectrum of the newest line
+            using (Pen tick = new Pen(_t.Line))
+                foreach (double hz in tones) g.DrawLine(tick, xOf(hz), sr.Top, xOf(hz), sr.Bottom);
+            float[] s = _last;
+            if (s != null && s.Length > 1 && !float.IsNaN(_floor))
             {
-                float max = float.MinValue;
-                foreach (float v in s) max = Math.Max(max, v);
-                float floor = max - 40;
                 PointF[] pts = new PointF[s.Length + 2];
                 for (int i = 0; i < s.Length; i++)
                 {
-                    float v = Math.Max(0, Math.Min(1, (s[i] - floor) / 40f));
+                    float v = Math.Max(0, Math.Min(1, (s[i] - _floor + 3) / 40f));
                     pts[i + 1] = new PointF(sr.Left + i * (sr.Width - 1f) / (s.Length - 1), sr.Bottom - v * (sr.Height - 2));
                 }
                 pts[0] = new PointF(sr.Left, sr.Bottom);
@@ -327,7 +379,30 @@ namespace Kainos.Sstv.UI
             if (Math.Abs(Shift) >= 1)
             {
                 float x = xOf(1900 + Shift);
-                using (Pen p = new Pen(_t.Gold) { DashStyle = DashStyle.Dot }) g.DrawLine(p, x, sr.Top, x, sr.Bottom);
+                using (Pen p = new Pen(_t.Gold) { DashStyle = DashStyle.Dot }) g.DrawLine(p, x, wr.Top, x, sr.Bottom);
+            }
+            using (Font f = _t.Font(_t.S(9), false))
+            using (Brush lb = new SolidBrush(_t.Faint))
+                foreach (double hz in tones)
+                {
+                    string label = hz == 1200 ? "sync" : hz == 1500 ? "black" : hz == 1900 ? "1900" : "white";
+                    SizeF sz = g.MeasureString(label, f);
+                    g.DrawString(label, f, lb, xOf(hz) - sz.Width / 2, sr.Bottom + 1);
+                }
+
+            // the input level: peak, -60 to 0 dB
+            using (Font f = _t.Font(_t.S(9), true))
+            using (Brush kb = new SolidBrush(_t.Dim))
+            {
+                int kw = _t.S(44);
+                g.DrawString("AUDIO", f, kb, lr.Left, lr.Top);
+                Rectangle bar = new Rectangle(lr.Left + kw, lr.Top + _t.S(2), lr.Width - kw - _t.S(74), lr.Height - _t.S(4));
+                using (Brush bg = new SolidBrush(_t.Bg)) g.FillRectangle(bg, bar);
+                float v = Math.Max(0, Math.Min(1, (PeakDb + 60) / 60f));
+                Color c = PeakDb > -1 ? _t.Tx : PeakDb > -3 ? _t.Gold : PeakDb < -45 ? _t.Faint : _t.Ice;
+                using (Brush fb = new SolidBrush(c)) g.FillRectangle(fb, bar.Left, bar.Top, (int)(bar.Width * v), bar.Height);
+                string txt = PeakDb < -100 ? "no audio" : PeakDb > -1 ? "clipping" : PeakDb < -45 ? "very low" : PeakDb.ToString("0") + " dB";
+                using (Brush tb = new SolidBrush(PeakDb > -1 ? _t.Tx : _t.Text)) g.DrawString(txt, f, tb, bar.Right + _t.S(6), lr.Top);
             }
         }
     }

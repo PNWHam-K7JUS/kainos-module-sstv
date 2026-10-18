@@ -81,7 +81,7 @@ namespace Kainos.Sstv.SelfTest
             long due = (long)(_rxClock.Elapsed.TotalSeconds * Speed * RxRate);
             int n = (int)Math.Min(Math.Min(max, dst.Length), due - _rxRead);
             if (n <= 0) return 0;
-            lock (_air) for (int i = 0; i < n; i++) dst[i] = _air.Count > 0 ? _air.Dequeue() * 0.5f : 0f;
+            lock (_air) for (int i = 0; i < n; i++) dst[i] = (_air.Count > 0 ? _air.Dequeue() * 0.5f : 0f) + (float)(Program.Gauss() * 0.02);      // and a little band noise
             _rxRead += n;
             return n;
         }

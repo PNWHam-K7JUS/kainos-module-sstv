@@ -97,7 +97,7 @@ namespace Kainos.Sstv.UI
             _rxSel.Text = "RX" + (_e.Rx + 1);
             _gallery.SetItems(Gallery.Load(_folder, 300));
 
-            _timer = new Timer { Interval = 250 };
+            _timer = new Timer { Interval = 100 };      // the waterfall gets a line every 100 ms
             _timer.Tick += (s, e) => tick();
             _timer.Start();
             _built = true;
@@ -292,7 +292,13 @@ namespace Kainos.Sstv.UI
                 if (_savedItem == null) { _view.Progress = _livePic.Complete ? -1 : _livePic.LinesDone / (double)_livePic.Mode.Lines; _view.Invalidate(); }
                 showDetails();
             }
-            if (_specDirty) { _specDirty = false; _details.Spectrum = _e.Spectrum; _details.Invalidate(); }
+            if (_specDirty)
+            {
+                _specDirty = false;
+                foreach (float[] line in _e.TakeLines()) _details.AddLine(line);
+                _details.PeakDb = _e.PeakDb;
+                _details.Invalidate();
+            }
             markers();
             if (DateTime.UtcNow - _statusAt > TimeSpan.FromSeconds(8)) status(null);
         }

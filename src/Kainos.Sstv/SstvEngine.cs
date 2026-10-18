@@ -149,24 +149,41 @@ namespace Kainos.Sstv
             return s.Length / (double)rate;
         }
 
-        // ---- the tuning spectrum: 25 Hz bins from 1000 to 2500 Hz, every 100 ms ----
+        // ---- the waterfall and spectrum: 10 Hz bins from 900 to 2500 Hz, a line every 100 ms; and the input level ----
 
-        public const double SpecLo = 1000, SpecHi = 2500, SpecStep = 25;
+        public const double SpecLo = 900, SpecHi = 2500, SpecStep = 10;
         public static readonly int SpecBins = (int)((SpecHi - SpecLo) / SpecStep) + 1;
-        private readonly float[] _spec = new float[SpecBins];
         private readonly float[] _ring = new float[8192];
-        private int _ringPos, _since, _specRate;
+        private int _ringPos, _since;
+        private double _peak, _sumSq;
+        private int _levelN;
+        private readonly System.Collections.Generic.Queue<float[]> _lines = new System.Collections.Generic.Queue<float[]>();
 
-        // the latest spectrum (dB), copied
-        public float[] Spectrum { get { lock (_spec) return (float[])_spec.Clone(); } }
+        // the input level over the last 100 ms (dB below full scale)
+        public volatile float PeakDb = -120, RmsDb = -120;
+
+        // the spectrum lines since the last call (dB, oldest first)
+        public float[][] TakeLines() { lock (_lines) { float[][] l = _lines.ToArray(); _lines.Clear(); return l; } }
 
         private void spectrum(float[] a, int n, int rate)
         {
-            for (int i = 0; i < n; i++) { _ring[_ringPos] = a[i]; _ringPos = (_ringPos + 1) % _ring.Length; }
-            _specRate = rate;
+            for (int i = 0; i < n; i++)
+            {
+                float v = a[i];
+                _ring[_ringPos] = v;
+                _ringPos = (_ringPos + 1) % _ring.Length;
+                double av = Math.Abs(v);
+                if (av > _peak) _peak = av;
+                _sumSq += v * v;
+            }
+            _levelN += n;
             _since += n;
             if (_since < rate / 10) return;
             _since = 0;
+            PeakDb = (float)(20 * Math.Log10(_peak + 1e-6));
+            RmsDb = (float)(10 * Math.Log10(_sumSq / Math.Max(1, _levelN) + 1e-12));
+            _peak = 0; _sumSq = 0; _levelN = 0;
+
             int len = Math.Min(_ring.Length, rate * 8 / 100);        // 80 ms
             float[] x = new float[len];
             for (int i = 0; i < len; i++)
@@ -178,12 +195,12 @@ namespace Kainos.Sstv
             for (int b = 0; b < SpecBins; b++)
             {
                 // Goertzel
-                double k = 2 * Math.Cos(2 * Math.PI * (SpecLo + b * SpecStep) / _specRate), s1 = 0, s2 = 0;
+                double k = 2 * Math.Cos(2 * Math.PI * (SpecLo + b * SpecStep) / rate), s1 = 0, s2 = 0;
                 for (int i = 0; i < len; i++) { double s0 = x[i] + k * s1 - s2; s2 = s1; s1 = s0; }
-                double p = (s1 * s1 + s2 * s2 - k * s1 * s2) / (len * len);
-                o[b] = (float)(10 * Math.Log10(p + 1e-12));
+                double p = (s1 * s1 + s2 * s2 - k * s1 * s2) / ((double)len * len);
+                o[b] = (float)(10 * Math.Log10(p + 1e-14));
             }
-            lock (_spec) Array.Copy(o, _spec, SpecBins);
+            lock (_lines) { _lines.Enqueue(o); while (_lines.Count > 100) _lines.Dequeue(); }
             SpectrumReady?.Invoke();
         }
     }
