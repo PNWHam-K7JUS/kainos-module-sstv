@@ -26,7 +26,9 @@ namespace Kainos.Sstv.UI
         private readonly SstvEngine _e;
         private readonly string _folder;
 
-        private readonly KButton _band, _rxSel, _startBtn, _skip, _openFolder, _pop, _options;
+        private readonly KButton _band, _rxSel, _startBtn, _skip, _adjust, _afcBtn, _sensBtn, _openFolder, _pop, _options;
+        private AdjustForm _adjustForm;
+        private static readonly string[] SensNames = { "Low", "Normal", "High" };
         private readonly Label _status;
         private readonly PictureView _view;
         private readonly KainosCrispHost _viewHost;
@@ -80,6 +82,9 @@ namespace Kainos.Sstv.UI
             _rxSel = btn("RX1", "The receiver listened to: RX1 or RX2");
             _startBtn = btn("Start", "Start a picture now in a mode you pick, for when its header was missed (weak, or you tuned in part way). Normally the mode is found by itself.");
             _skip = btn("Skip", "End the picture being received now (it's kept if a quarter or more came in). It isn't started again from its line sync for a minute.");
+            _adjust = btn("Adjust", "Straighten the last picture received, or move it left or right, if it came out slanted or wrapped round. It's drawn again from its audio (kept for 5 minutes).");
+            _afcBtn = btn("AFC", "AFC: follow the tuning from the pictures' sync pulses, for the right colours and a steady picture when you're a little off frequency. Lit: on.");
+            _sensBtn = btn("Normal", "Sensitivity: how readily a picture is found without its header, and how long one is held through a fade before it's ended (Low 10 s, Normal 20 s, High 30 s). Click to change.");
             _openFolder = btn("Pictures", "Open the folder the received pictures are saved in");
             _pop = btn("Pop out", "Docked under the panadapter, or in its own window");
             _options = btn("Options", "Saving, panadapter markers and display");
@@ -98,7 +103,7 @@ namespace Kainos.Sstv.UI
             buildSendBar();
             wire();
             _e.Rx = host.GetSetting("rx", "0") == "1" ? 1 : 0;
-            _e.Decoder.AutoStart = host.GetSetting("autostart", "1") == "1";
+            applyReceiveSettings();
             _rxSel.Text = "RX" + (_e.Rx + 1);
             _gallery.SetItems(Gallery.Load(_folder, 300));
 
@@ -131,7 +136,9 @@ namespace Kainos.Sstv.UI
             int pad = _t.S(4), bh = _t.S(24), x = pad, y = pad;
             Action<Control, int> place = (c, w) => { c.SetBounds(x, y, _t.S(w), bh); x += _t.S(w) + pad; };
             place(_band, 64); place(_rxSel, 44); x += pad;
-            place(_startBtn, 52); place(_skip, 52); place(_openFolder, 70);
+            place(_startBtn, 52); place(_skip, 52); place(_adjust, 60); x += pad;
+            place(_afcBtn, 44); place(_sensBtn, 70); x += pad;
+            place(_openFolder, 70);
             int right = Width - pad;
             _options.SetBounds(right - _t.S(64), y, _t.S(64), bh); right -= _t.S(64) + pad;
             _pop.SetBounds(right - _t.S(64), y, _t.S(64), bh); right -= _t.S(64) + pad;
@@ -163,6 +170,16 @@ namespace Kainos.Sstv.UI
                 _host.SetMarkers(1 - _e.Rx, null);
             };
             _skip.Click += (s, e) => _e.Cut();
+            _adjust.Click += (s, e) => openAdjust();
+            _afcBtn.Click += (s, e) => { _host.SetSetting("afc", _e.Decoder.Afc ? "0" : "1"); applyReceiveSettings(); };
+            _sensBtn.Click += (s, e) =>
+            {
+                _host.SetSetting("sens", ((_e.Decoder.Sensitivity + 1) % 3).ToString(CultureInfo.InvariantCulture));
+                applyReceiveSettings();
+                status("Sensitivity " + SensNames[_e.Decoder.Sensitivity].ToLowerInvariant());
+            };
+            _e.Redrawn += (p, ok) => _host.BeginInvoke(() => redrawn(p, ok));
+            _e.Decoder.Resumed += p => _host.BeginInvoke(() => resumed(p));
             _startBtn.Click += (s, e) => startMenu().Show(_startBtn, new Point(0, _startBtn.Height));
             _openFolder.Click += (s, e) => openFolder();
             _pop.Click += (s, e) => PopToggled?.Invoke();
@@ -183,7 +200,12 @@ namespace Kainos.Sstv.UI
             _e.Decoder.Abandoned += p => _host.BeginInvoke(() => abandoned(p));
             _e.SpectrumReady += () => _specDirty = true;
             // headers that nearly passed: in the log, and briefly in the status line
-            _e.Decoder.Diag += d => { _host.Log("vis: " + d); _host.BeginInvoke(() => status("Heard what may be a " + d)); };
+            _e.Decoder.Diag += d =>
+            {
+                _host.Log("vis: " + d);
+                string say = d.StartsWith("header") ? "Heard what may be a " + d : char.ToUpperInvariant(d[0]) + d.Substring(1);
+                _host.BeginInvoke(() => status(say));
+            };
             _status.Click += (s, e) => { if (_e.Lost) { _e.Listen(); status("Listening again"); } };
         }
 
@@ -253,9 +275,16 @@ namespace Kainos.Sstv.UI
                 m.Items.Add(it);
                 return it;
             };
-            check("Keep pictures that were cut short", "savecut", "1", "Save a picture that ended early (signal lost, or Skip) if a quarter or more of it came in");
             ToolStripMenuItem auto = check("Start pictures without a header (from their line sync)", "autostart", "1", "When a picture's header was missed (a fade, QRM, or you tuned in part way), find its mode from the rhythm of its line sync and start it");
-            auto.Click += (s, e) => _e.Decoder.AutoStart = _host.GetSetting("autostart", "1") == "1";
+            auto.Click += (s, e) => applyReceiveSettings();
+            ToolStripMenuItem stop = check("End those when their signal goes (auto stop)", "autostop", "1", "A picture found without its header ends once its signal has been gone for a while (it carries on if the signal comes back soon after). Off: it runs a whole picture's length, and Skip or the next header ends it.");
+            stop.Click += (s, e) => applyReceiveSettings();
+            ToolStripMenuItem afc = check("AFC: follow the tuning from the sync pulses", "afc", "1", "For the right colours and a steady picture when you're a little off frequency");
+            afc.Click += (s, e) => applyReceiveSettings();
+            m.Items.Add(sensitivityMenu());
+            m.Items.Add(modesMenu());
+            m.Items.Add(new ToolStripSeparator());
+            check("Keep pictures that were cut short", "savecut", "1", "Save a picture that ended early (signal lost, or Skip) if a quarter or more of it came in");
             check("Show the SSTV tones on the panadapter", "markers", "1", "Lines at sync (1200 Hz), black (1500 Hz) and white (2300 Hz) from the VFO, to tune by");
             check("Log window after sending a 73", "log73", "1", "Open Log QSO, filled in, when your 73 picture has gone out");
             check("Send logged QSOs to logging programs", "udp.on", "1", "As WSJT-X does (UDP \"Logged ADIF\"), for Log4OM, N1MM+, HRD, DXKeeper and GridTracker");
@@ -283,6 +312,143 @@ namespace Kainos.Sstv.UI
             m.Items.Add(open);
             m.Closed += (s, e) => BeginInvoke(new Action(m.Dispose));
             return m;
+        }
+
+        // ---- receive settings ----
+
+        private void applyReceiveSettings()
+        {
+            SstvDecoder d = _e.Decoder;
+            d.AutoStart = _host.GetSetting("autostart", "1") == "1";
+            d.AutoStop = _host.GetSetting("autostop", "1") == "1";
+            d.Afc = _host.GetSetting("afc", "1") == "1";
+            int sens;
+            d.Sensitivity = int.TryParse(_host.GetSetting("sens", "1"), out sens) && sens >= 0 && sens <= 2 ? sens : 1;
+            string modes = _host.GetSetting("automodes", "");
+            d.AutoModes = modes.Length == 0 ? null : new HashSet<string>(modes.Split(','), StringComparer.OrdinalIgnoreCase);
+            _afcBtn.On = d.Afc;
+            _sensBtn.Text = SensNames[d.Sensitivity];
+        }
+
+        private ToolStripMenuItem sensitivityMenu()
+        {
+            ToolStripMenuItem m = new ToolStripMenuItem("Sensitivity") { ToolTipText = "How readily a picture is found without its header, and how long one is held through a fade" };
+            string[] tips =
+            {
+                "Fewer false starts; a picture without its header is ended 10 s after its signal goes",
+                "A picture without its header is ended 20 s after its signal goes",
+                "Finds weaker pictures without their header; holds one 30 s through a fade",
+            };
+            for (int i = 0; i < 3; i++)
+            {
+                int v = i;
+                ToolStripMenuItem it = new ToolStripMenuItem(SensNames[i]) { Checked = _e.Decoder.Sensitivity == i, ToolTipText = tips[i] };
+                it.Click += (s, e) => { _host.SetSetting("sens", v.ToString(CultureInfo.InvariantCulture)); applyReceiveSettings(); };
+                m.DropDownItems.Add(it);
+            }
+            return m;
+        }
+
+        // the modes looked for without a header (a header is always believed): fewer means fewer false starts
+        private ToolStripMenuItem modesMenu()
+        {
+            ToolStripMenuItem m = new ToolStripMenuItem("Modes found without a header") { ToolTipText = "Which modes are looked for from their line sync when a header was missed. A picture with its header is received in any mode." };
+            HashSet<string> on = _e.Decoder.AutoModes;
+            Action<IEnumerable<string>> set = list =>
+            {
+                string v = list == null ? "" : string.Join(",", list);
+                _host.SetSetting("automodes", v.Length == 0 && list != null ? "none" : v);
+                applyReceiveSettings();
+            };
+            ToolStripMenuItem all = new ToolStripMenuItem("All") { Checked = on == null };
+            all.Click += (s, e) => set(null);
+            m.DropDownItems.Add(all);
+            ToolStripMenuItem common = new ToolStripMenuItem("The usual HF ones") { ToolTipText = "Martin M1, Scottie S1, Scottie DX, Robot 36, PD-120: most of what's sent on HF" };
+            common.Click += (s, e) => set(new[] { "M1", "S1", "SDX", "R36", "PD120" });
+            m.DropDownItems.Add(common);
+            m.DropDownItems.Add(new ToolStripSeparator());
+            foreach (SstvMode mode in SstvModes.All)
+            {
+                string sh = mode.Short;
+                ToolStripMenuItem it = new ToolStripMenuItem(mode.Name) { Checked = on == null || on.Contains(sh) };
+                it.Click += (s, e) =>
+                {
+                    HashSet<string> cur = _e.Decoder.AutoModes != null ? new HashSet<string>(_e.Decoder.AutoModes, StringComparer.OrdinalIgnoreCase)
+                                                                       : new HashSet<string>(SstvModes.All.Select(x => x.Short), StringComparer.OrdinalIgnoreCase);
+                    if (!cur.Remove(sh)) cur.Add(sh);
+                    set(cur.Count == SstvModes.All.Length ? null : SstvModes.All.Select(x => x.Short).Where(cur.Contains).ToList());
+                };
+                m.DropDownItems.Add(it);
+            }
+            return m;
+        }
+
+        // ---- Adjust: the last picture received, straightened or moved, drawn again from its audio ----
+
+        private SstvPicture _adjustPic;
+
+        private bool canAdjust { get { return _livePic != null && _livePic.Complete && _livePic.State != null && !_e.Sending; } }
+
+        private void openAdjust()
+        {
+            if (_adjustForm != null && !_adjustForm.IsDisposed) { _adjustForm.Activate(); return; }
+            if (!canAdjust) { status("Adjust works on the last picture received, once it's in"); return; }
+            clearPreview();
+            showLive();
+            SstvPicture p = _livePic;
+            _adjustPic = p;
+            AdjustForm f = new AdjustForm(_host, p.Mode.Name + " " + p.StartUtc.ToString("HH:mm", CultureInfo.InvariantCulture) + "Z");
+            _adjustForm = f;
+            f.Changed += () => _e.Redraw(p, f.Ppm, f.Ms);
+            f.SaveWanted += () => { savePicture(p); status("Saved the adjusted picture"); };
+            f.FormClosed += (s, e) =>
+            {
+                if (!f.Saved) _e.Redraw(p, 0, 0);       // not saved: back as it was
+                _adjustForm = null;
+                _adjustPic = null;
+            };
+            f.Show(FindForm());
+        }
+
+        private void redrawn(SstvPicture p, bool ok)
+        {
+            if (!ok)
+            {
+                if (_adjustForm != null && p == _adjustPic) _adjustForm.Note = "Its audio has gone (only the last 5 minutes are kept)";
+                return;
+            }
+            if (_adjustForm != null && p == _adjustPic) _adjustForm.Note = "";
+            if (p == _livePic && _live != null)
+            {
+                Gallery.CopyInto(p, _live);
+                if (showingLive) _view.Invalidate();
+                showDetails();
+            }
+        }
+
+        // an ended picture's signal came back in step: the same picture carries on
+        private void resumed(SstvPicture p)
+        {
+            if (p != _livePic)
+            {
+                _livePic = p;
+                if (_live != null) _live.Dispose();
+                _live = new Bitmap(p.Mode.Width, p.Mode.Lines, System.Drawing.Imaging.PixelFormat.Format24bppRgb);
+                Gallery.CopyInto(p, _live);
+                if (_pvTemplate == null) showLive();
+            }
+            if (_adjustForm != null && p == _adjustPic) _adjustForm.Close();
+            status("Signal back: carrying on with the " + p.Mode.Name + " picture");
+        }
+
+        // saves a picture (in place of an earlier save of it: the name comes from its start time, mode and callsign)
+        private GalleryItem savePicture(SstvPicture p)
+        {
+            bool complete = p.LinesDone >= p.Mode.Lines - 2;
+            GalleryItem it = Gallery.Save(_folder, p, _host.Radio.VfoHz(_e.Rx), complete);
+            foreach (GalleryItem old in _gallery.Items.Where(x => string.Equals(x.Path, it.Path, StringComparison.OrdinalIgnoreCase)).ToList()) _gallery.Remove(old);
+            _gallery.Insert(it);
+            return it;
         }
 
         private void openFolder()
@@ -398,8 +564,7 @@ namespace Kainos.Sstv.UI
             {
                 try
                 {
-                    GalleryItem it = Gallery.Save(_folder, p, _host.Radio.VfoHz(_e.Rx), complete);
-                    _gallery.Insert(it);
+                    GalleryItem it = savePicture(p);
                     _host.Log("received " + p.Mode.Name + (p.Callsign.Length > 0 ? " from " + p.Callsign : "") + ", " + p.LinesDone + " lines: " + it.Path);
                 }
                 catch (Exception ex) { _host.Log("save: " + ex); status("Couldn't save the picture: " + ex.Message); return; }
@@ -450,7 +615,8 @@ namespace Kainos.Sstv.UI
                 if (workedText(p.Callsign).Length > 0) row("Worked", workedText(p.Callsign));
                 row("Started", p.StartUtc.ToString("HH:mm:ss", CultureInfo.InvariantCulture) + "Z");
                 row("Lines", p.LinesDone + " of " + p.Mode.Lines);
-                row("Tuning", p.FreqShift.ToString("+0;-0;0", CultureInfo.InvariantCulture) + " Hz");
+                row("Tuning", p.FreqShift.ToString("+0;-0;0", CultureInfo.InvariantCulture) + " Hz" + (_e.Decoder.Afc ? " (AFC)" : ""));
+                if (p.Rejoined > 0) row("Fade", "rejoined" + (p.Rejoined > 1 ? " " + p.Rejoined + "x" : ""));
                 if (p.Complete) row("Slant", Math.Abs(p.SlantPpm) < 20 ? "none" : "fixed (" + p.SlantPpm.ToString("+0;-0", CultureInfo.InvariantCulture) + " ppm)");
                 _details.Shift = p.FreqShift;
             }
@@ -480,6 +646,7 @@ namespace Kainos.Sstv.UI
             _status.Text = _statusText;
             _status.Cursor = _e.Lost ? Cursors.Hand : Cursors.Default;
             _skip.Enabled = _e.Decoder.Receiving;
+            _adjust.Enabled = canAdjust;
         }
 
         private void markers()

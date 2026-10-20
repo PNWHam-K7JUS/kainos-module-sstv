@@ -2,6 +2,20 @@
 
 A module for [Kainos](https://github.com/PNWHam-K7JUS/Kainos), the Hermes Lite 2 SDR program: SSTV pictures received inside Kainos, in the Kainos look, with no virtual audio cables or separate program.
 
+## Receive controls
+
+On the bar along the top:
+
+- **Adjust** straightens the last picture received, or moves it left or right, if it came out slanted or wrapped round. It's drawn again from its audio as you press the buttons; **Save** keeps it. The audio is kept for 5 minutes.
+- **AFC** (lit: on) follows the tuning from the pictures' sync pulses, so a picture has the right colours, and the sync stays easy to find, when you're a little off frequency. Pictures found without their header used to be read as though you were tuned exactly.
+- **Low / Normal / High** is the sensitivity: how readily a picture is found without its header, and how long one is held through a fade before it's ended (10, 20 or 30 seconds).
+
+Under **Options**:
+
+- **End those when their signal goes (auto stop)**: a picture found without its header carries on through a fade, and is ended only once its signal has been gone for the hold time, cut back to its last good line. If the signal comes back within 90 seconds, in step with the picture, the same picture carries on (and is saved again in place of the part saved before). Off, it runs a whole picture's length, and Skip or the next header ends it.
+- **Sensitivity**, as on the bar.
+- **Modes found without a header**: the modes looked for from their line sync. Fewer means fewer false starts; **The usual HF ones** is Martin M1, Scottie S1, Scottie DX, Robot 36 and PD-120. A picture with its header is received in any mode.
+
 ## Sending
 
 - **First-run setup**: the first time SSTV opens it asks for your callsign, name, town, grid, radio, antenna, power, a photo (optional) and the mode for your CQs, showing your CQ picture as you type. **Create my pictures** makes your **CQ**, **Reply** and **73** pictures from them. Options > Station setup... changes them later.
@@ -46,7 +60,7 @@ One digital mode is open at a time: SSTV, FT8 / FT4 (the Digital Modes module) a
 | Part | What it does |
 |---|---|
 | `SstvModes.cs` | The mode table: VIS codes, sync, porch and gap times, pixel times and line layouts. |
-| `SstvDecoder.cs` | Resamples to 24 kHz and finds the instantaneous frequency of every sample (mixed down from 1900 Hz, low-passed, phase difference). Finds the VIS header in 10 ms steps, then decodes each line once it is all in. It fits a straight line through the sync pulses for slant, redraws the whole picture at the end, then reads the FSK ID. |
+| `SstvDecoder.cs` | Resamples to 24 kHz and finds the instantaneous frequency of every sample (mixed down from 1900 Hz, low-passed, phase difference). Finds the VIS header in 10 ms steps, then decodes each line once it is all in. It fits a straight line through the sync pulses for slant, redraws the whole picture at the end, then reads the FSK ID. AFC: each line's sync-pulse frequency, as a running median, gives the tuning. A picture found without its header is held through fades (4 of the last 6 lines with a strong sync on the line timing means the signal is there), ended after the hold, and rejoined if it comes back in step. `Redraw` draws a finished one again with its slant or start moved. |
 | `SstvEncoder.cs` | A picture to SSTV audio: VIS, lines and FSK ID. Used by the self-test now, and for sending next. |
 | `SstvEngine.cs` | The thread that takes the receiver's audio from Kainos and feeds the decoder, plus the tuning spectrum. |
 | `Gallery.cs` | Saving and listing received pictures. |

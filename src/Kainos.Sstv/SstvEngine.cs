@@ -57,6 +57,12 @@ namespace Kainos.Sstv
         public void Cut() { _cut = true; }
         private volatile bool _cut;
 
+        // draws a finished picture again with its slant (ppm) and start (ms) moved: the Adjust window. Done on the engine's
+        // thread, which owns the decoder; Redrawn says whether it could (its audio is kept for 330 s)
+        public void Redraw(SstvPicture p, double ppm, double ms) { _redraw = Tuple.Create(p, ppm, ms); }
+        private volatile Tuple<SstvPicture, double, double> _redraw;
+        public event Action<SstvPicture, bool> Redrawn;
+
         // starts a picture in a mode now, without waiting for a header
         public void StartNow(SstvMode m) { _startNow = m; }
         private volatile SstvMode _startNow;
@@ -89,6 +95,8 @@ namespace Kainos.Sstv
                     if (_cut) { _cut = false; Decoder.Skip(); }
                     SstvMode sn = _startNow;
                     if (sn != null) { _startNow = null; Decoder.StartNow(sn); }
+                    Tuple<SstvPicture, double, double> rd = _redraw;
+                    if (rd != null) { _redraw = null; bool ok = Decoder.Redraw(rd.Item1, rd.Item2, rd.Item3); Redrawn?.Invoke(rd.Item1, ok); }
                     float[] pend = _pendingWave;
                     if (pend != null) { _pendingWave = null; startTx(pend); }
                     if (Sending) feedTx();

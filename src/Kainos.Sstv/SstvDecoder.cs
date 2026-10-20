@@ -12,6 +12,8 @@ SSTV receive, as a stream: audio in (any rate), pictures out.
      line starts. Pixels are the frequency averaged over each pixel's time.
   4. At the end, the fit with every line, and the whole picture redrawn from it; then MMSSTV's FSK ID callsign,
      if it follows.
+  5. AFC: the sync pulse's own frequency, line by line, gives the tuning (a running median), so a picture found
+     without its header (no leader to measure) has the right colours, and the sync detector follows it.
 
 This file is part of the Kainos SSTV module. Copyright (C) 2026 Justin Cron K7JUS. GPLv3 or later.
 */
@@ -33,6 +35,8 @@ namespace Kainos.Sstv
         public double SlantPpm;             // the sender's clock against ours (parts per million)
         public DateTime StartUtc;
         public bool NoHeader;               // started from its line sync (the header was missed)
+        public int Rejoined;                // times its signal came back after it had been ended (and it carried on)
+        internal object State;              // the decoder's timing for it, kept for Redraw and rejoining
     }
 
     internal class SstvDecoder
@@ -43,6 +47,23 @@ namespace Kainos.Sstv
         public event Action<SstvPicture> Progress;      // more lines drawn (on the decoder's thread)
         public event Action<SstvPicture> Finished;      // complete (or cut short), slant-corrected, with the FSK ID callsign
         public event Action<SstvPicture> Abandoned;     // a false start: no line sync in its first lines (nothing to keep)
+        public event Action<SstvPicture> Resumed;       // an ended picture's signal came back in time: it carries on (same object)
+
+        // ---- receive settings (the Options menu; set from the UI thread, read here) ----
+
+        // 0 low, 1 normal, 2 high: how readily a picture is found without its header, and how long one is held
+        // through a fade before it's ended
+        public int Sensitivity = 1;
+        // a picture found without its header ends once its signal has gone (after the hold); off, it runs a whole
+        // picture's length like one with a header, and Skip or the next header ends it
+        public bool AutoStop = true;
+        public bool Afc = true;
+        // the modes looked for without a header (null: all); a header is always believed
+        public HashSet<string> AutoModes;
+
+        private double holdSeconds { get { return Sensitivity == 0 ? 10 : Sensitivity == 2 ? 30 : 20; } }
+        private int autoHits { get { return Sensitivity == 0 ? 9 : 8; } }
+        private double autoScore { get { return Sensitivity == 0 ? 0.55 : Sensitivity == 2 ? 0.45 : 0.5; } }
         public Func<DateTime> Now = () => DateTime.UtcNow;
 
         // ---- 1. the frequency of every sample ----
@@ -145,6 +166,7 @@ namespace Kainos.Sstv
         private readonly double[,] _shRe = new double[4, SyncWin], _shIm = new double[4, SyncWin];
         private readonly double[] _sph = new double[4];
         private int _shPos;
+        private double _scoreShift;                     // Hz: the four tones moved by the tuning AFC has found (0 between pictures)
 
         private void syncScore(float x)
         {
@@ -152,7 +174,7 @@ namespace Kainos.Sstv
             for (int t = 0; t < 4; t++)
             {
                 double re = x * Math.Cos(_sph[t]), im = -x * Math.Sin(_sph[t]);
-                _sph[t] += 2 * Math.PI * SyncHz[t] / Rate;
+                _sph[t] += 2 * Math.PI * (SyncHz[t] + _scoreShift) / Rate;
                 if (_sph[t] > 2 * Math.PI) _sph[t] -= 2 * Math.PI;
                 _sre[t] += re - _shRe[t, _shPos]; _sim[t] += im - _shIm[t, _shPos];
                 _shRe[t, _shPos] = re; _shIm[t, _shPos] = im;
@@ -327,8 +349,54 @@ namespace Kainos.Sstv
         private bool[] _onTrack;                        // each line's sync found within 2.5 ms of the fitted line timing
         private bool _refolded;                         // the first lines' syncs have been looked for together
         private double[] _cb, _cr;                      // Robot 36: the last chroma lines
+        private double[] _lineAfc;                      // Hz, per radio line: the sync pulse's frequency less 1200 (NaN: not measured)
+        private double _shiftNow;                       // Hz: the tuning the line being drawn is read with
+        internal double[] DebugSyncHere { get { return _syncHere; } }
+        internal bool[] DebugOnTrack { get { return _onTrack; } }
+        private int _lastGood;                          // the last line with a clear sync on the line timing (-1: none yet)
+        private long _endN;                             // the sample a picture ended at (for rejoining)
+        private PicState _rejoin;                       // a picture without a header that ended when its signal went
+        // A rejoined picture: the lines before the rejoin keep the timing they were drawn with (frozen, per line), and the
+        // fit is made afresh from the rejoin on, so the old lines can't outvote the returning ones (nor a gap bend them)
+        private int _segStart;
+        private double[] _frozenAt, _frozenPer;          // per radio line: its sync time and line length (NaN: not frozen)
+        private double _drawPeriod;                     // the line length of the line being drawn
 
-        private void start(SstvMode m, long t0, double shift)
+        // a picture's decoding state, kept with it when it ends: to carry on if its signal comes back (rejoin), and to
+        // draw it again with its slant or start moved (Redraw)
+        private sealed class PicState
+        {
+            public SstvPicture Pic;
+            public long T0, EndN;
+            public double Shift, Period, Phase;
+            public double[] Sync, SyncHere, LineNoise, LineAfc;
+            public bool[] OnTrack;
+            public int NextLine, LastGood, Drawn, SegStart;
+            public bool Refolded;
+            public double[] FrozenAt, FrozenPer;
+        }
+
+        private PicState saveState()
+        {
+            return new PicState
+            {
+                Pic = _pic, T0 = _t0, EndN = _endN, Shift = _shift, Period = _period, Phase = _phase, Sync = _sync, SyncHere = _syncHere,
+                LineNoise = _lineNoise, LineAfc = _lineAfc, OnTrack = _onTrack, NextLine = _nextLine, LastGood = _lastGood, Refolded = _refolded,
+                SegStart = _segStart, FrozenAt = _frozenAt, FrozenPer = _frozenPer,
+            };
+        }
+
+        private void loadState(PicState s)
+        {
+            _pic = s.Pic; _t0 = s.T0; _endN = s.EndN; _shift = s.Shift; _period = s.Period; _phase = s.Phase; _sync = s.Sync; _syncHere = s.SyncHere;
+            _lineNoise = s.LineNoise; _lineAfc = s.LineAfc; _onTrack = s.OnTrack; _nextLine = s.NextLine; _lastGood = s.LastGood; _refolded = s.Refolded;
+            _segStart = s.SegStart; _frozenAt = s.FrozenAt; _frozenPer = s.FrozenPer;
+            _cb = new double[_pic.Mode.Width];
+            _cr = new double[_pic.Mode.Width];
+            for (int i = 0; i < _pic.Mode.Width; i++) { _cb[i] = 128; _cr[i] = 128; }
+        }
+
+        private void start(SstvMode m, long t0, double shift, bool fromLineSync = false)
         {
             _hunt = false;
             if (_pic != null && !_pic.Complete) finish(true);
@@ -342,6 +410,16 @@ namespace Kainos.Sstv
             _onTrack = new bool[m.RadioLines];
             _syncHere = new double[m.RadioLines];
             _lineNoise = Enumerable.Repeat(double.NaN, m.RadioLines).ToArray();
+            _lineAfc = Enumerable.Repeat(double.NaN, m.RadioLines).ToArray();
+            _shiftNow = shift;
+            _scoreShift = Afc ? Math.Max(-150, Math.Min(150, shift)) : 0;
+            _lastGood = -1;
+            _segStart = 0;
+            _frozenAt = Enumerable.Repeat(double.NaN, m.RadioLines).ToArray();
+            _frozenPer = new double[m.RadioLines];
+            // a picture with its header (or Start) means the one that ended isn't coming back; one found from line sync
+            // may be a false start in the fade, so the ended one is still looked for
+            if (!fromLineSync) _rejoin = null;
             _refolded = false;
             _cb = new double[m.Width];
             _cr = new double[m.Width];
@@ -377,23 +455,34 @@ namespace Kainos.Sstv
                     if (_refolded) { abandon(); return; }
                     _refolded = true;
                     foldHunt(12);
-                    for (int i = 0; i < _sync.Length; i++) { _sync[i] = double.NaN; _onTrack[i] = false; }
+                    for (int i = 0; i < _sync.Length; i++) { _sync[i] = double.NaN; _onTrack[i] = false; _lineAfc[i] = double.NaN; }
+                    _lastGood = -1;
                     _nextLine = 0;
                     continue;
                 }
                 // Started without a header, it began part way through, so its count of lines says nothing about where it
-                // ends: it stops when its signal does. The sync score right where the line timing puts the pulse, averaged
-                // over the last 6 s (at least 8 lines): about 0.25 in noise, well above with a signal, even a weak one.
-                if (_pic.NoHeader)
+                // ends: it stops when its signal does. Through a fade it carries on drawing on the line timing, so a
+                // signal that comes back lands in the right place; only when the signal has been gone for the hold
+                // (10 / 20 / 30 s by sensitivity) does it end, cut back to the last line that had its sync. Should the
+                // signal come back after that, in step, it's rejoined (autoCheck).
+                int done = _nextLine - 1;
+                if (signalAt(done)) _lastGood = done;
+                if (_pic.NoHeader && AutoStop)
                 {
-                    int n = Math.Max(8, Math.Min(40, (int)Math.Round(6 / m.LineTime)));
-                    if (_nextLine >= n && meanSyncHere(_nextLine - n, _nextLine) < 0.38) { finish(true); return; }
+                    int n = Math.Max(10, (int)Math.Round(holdSeconds / m.LineTime));
+                    if (done - _lastGood >= n) { fadeEnd(); return; }
                 }
                 // Once a picture is confirmed, it runs to its end on the line timing even if the signal fades (as MMSSTV
                 // does): fading on HF comes back, and Skip or a new header ends it sooner.
             }
             if (drew) Progress?.Invoke(_pic);
-            if (_nextLine >= m.RadioLines) finish(false);
+            // one found without its header runs a whole picture's lines from where it was joined, which goes past its
+            // end: cut back to its last line with sync
+            if (_nextLine >= m.RadioLines)
+            {
+                if (_pic.NoHeader && AutoStop && _lastGood + 1 < m.RadioLines - 2) finish(true, _lastGood + 1);
+                else finish(false);
+            }
         }
 
         // the sync pulse of line l: near where it's expected, the stretch of the sync's length where the 1200 Hz tone's share
@@ -424,7 +513,7 @@ namespace Kainos.Sstv
         private void refit(bool all)
         {
             List<int> ls = new List<int>();
-            for (int l = 0; l < _sync.Length; l++) if (!double.IsNaN(_sync[l])) ls.Add(l);
+            for (int l = _segStart; l < _sync.Length; l++) if (!double.IsNaN(_sync[l])) ls.Add(l);
             if (ls.Count < 4) return;
             double slope, icpt;
             if (!fit(ls, out slope, out icpt)) return;
@@ -468,11 +557,11 @@ namespace Kainos.Sstv
 
         private double px(double t0, double pixelTime, int x, double more = 1)
         {
-            double k = _period / (_pic.Mode.LineTime * Rate);    // the sender's clock against ours
+            double k = _drawPeriod / (_pic.Mode.LineTime * Rate);    // the sender's clock against ours
             double w = pixelTime * Rate * k;
             double c = t0 + (x + 0.5) * w;
             double half = w * _pxWiden * more / 2;
-            if (_pxTrim <= 0.001) return SstvModes.ValueOf(meanF(c - half, c + half) - _shift);
+            if (_pxTrim <= 0.001) return SstvModes.ValueOf(meanF(c - half, c + half) - _shiftNow);
             // a trimmed mean: the noise's spikes (FM clicks) left out
             long a = (long)Math.Floor(c - half) + delay, b = (long)Math.Ceiling(c + half) + delay;
             if (b <= a) b = a + 1;
@@ -482,7 +571,7 @@ namespace Kainos.Sstv
             int cut = (int)(_pxBuf.Count * _pxTrim), n = _pxBuf.Count - 2 * cut;
             double sum = 0;
             for (int i = cut; i < cut + n; i++) sum += _pxBuf[i];
-            return SstvModes.ValueOf(sum / Math.Max(1, n) - _shift);
+            return SstvModes.ValueOf(sum / Math.Max(1, n) - _shiftNow);
         }
 
         private void put(int y, int x, int r, int g, int b)
@@ -509,6 +598,19 @@ namespace Kainos.Sstv
             for (long i = a; i < b; i++) { double f = F(i + delay); sum += f; sq += f * f; n++; }
             double mean = sum / n;
             _lineNoise[l] = Math.Sqrt(Math.Max(0, sq / n - mean * mean));
+            // AFC: a clear pulse (found on the timing, not too noisy) says where 1200 Hz is
+            if (!double.IsNaN(_sync[l]) && _onTrack[l] && _lineNoise[l] < 120) _lineAfc[l] = mean - SstvModes.FSync;
+        }
+
+        // the tuning at line l: the median of the sync pulses' frequencies nearby (needs four), or the header's
+        private double shiftAt(int l)
+        {
+            if (!Afc) return _shift;
+            List<double> v = new List<double>();
+            for (int i = Math.Max(0, l - 12); i <= Math.Min(_lineAfc.Length - 1, l + 12); i++) if (!double.IsNaN(_lineAfc[i])) v.Add(_lineAfc[i]);
+            if (v.Count < 4) return _shift;
+            v.Sort();
+            return Math.Max(-250, Math.Min(250, v[v.Count / 2]));
         }
 
         // the noise around line l: the median of the lines measured nearby
@@ -528,11 +630,19 @@ namespace Kainos.Sstv
         private void drawLine(int l)
         {
             SstvMode m = _pic.Mode;
-            double k = _period / (m.LineTime * Rate);
-            double ls = _phase + l * _period - m.SyncOffset * Rate * k;     // where the line begins
+            bool frozen = !double.IsNaN(_frozenAt[l]);
+            _drawPeriod = frozen ? _frozenPer[l] : _period;
+            double k = _drawPeriod / (m.LineTime * Rate);
+            double ls = (frozen ? _frozenAt[l] : _phase + l * _period) - m.SyncOffset * Rate * k;     // where the line begins
             if (double.IsNaN(_lineNoise[l])) measureNoise(l);
             double nz = noiseAt(l);
             LastNoise = nz;
+            _shiftNow = shiftAt(l);
+            if (!_pic.Complete)
+            {
+                _pic.FreqShift = _shiftNow;
+                if (Afc) _scoreShift = Math.Max(-150, Math.Min(150, _shiftNow));
+            }
             setPixelWindow(nz);
             Func<double, double> at = s => ls + s * Rate * k;                // a time in the line, in samples
             int w = m.Width;
@@ -556,7 +666,7 @@ namespace Kainos.Sstv
                 {
                     double y0 = at(m.Sync + m.Porch), sep = at(m.Sync + m.Porch + m.Scan), c0 = at(m.Sync + m.Porch + m.Scan + m.Gap + 0.0015);
                     // which chroma this line carries: the separator says (1500 Hz before R-Y, 2300 Hz before B-Y)
-                    double sf = meanF(sep + 0.001 * Rate, sep + (m.Gap - 0.001) * Rate) - _shift;
+                    double sf = meanF(sep + 0.001 * Rate, sep + (m.Gap - 0.001) * Rate) - _shiftNow;
                     bool isCr = sf < 1900;
                     double[] yy = new double[w];
                     for (int x = 0; x < w; x++)
@@ -641,6 +751,16 @@ namespace Kainos.Sstv
             return sum / inner;
         }
 
+        // the signal is there at line l: 4 of the 6 lines to it have a strong sync (score 0.45 or more) on the line timing.
+        // Measured (self-test --probe): signal lines pass that each 78 % of the time at -3 dB SNR, all of them at 6 dB;
+        // noise lines about 9 %, so 4 of 6 by chance about once in 1200 lines.
+        private bool signalAt(int l)
+        {
+            int good = 0;
+            for (int i = Math.Max(0, l - 5); i <= l; i++) if (_onTrack[i] && _syncHere[i] >= 0.45) good++;
+            return good >= 4;
+        }
+
         private double meanSyncHere(int from, int to)
         {
             double sum = 0;
@@ -692,6 +812,7 @@ namespace Kainos.Sstv
             SstvPicture p = _pic;
             _pic = null;
             _hunt = false;
+            _scoreShift = 0;
             Diag?.Invoke("false start (" + p.Mode.Name + "): no line sync in its first lines, dropped");
             Abandoned?.Invoke(p);
         }
@@ -724,8 +845,10 @@ namespace Kainos.Sstv
             double bestScore = 0, bestPer = 0;
             long bestAt = 0;
             int bestHits = 0;
+            HashSet<string> modes = AutoModes;
             foreach (SstvMode m in SstvModes.All)
             {
+                if (modes != null && !modes.Contains(m.Short)) continue;
                 double P = m.LineTime * AutoRate;
                 int span = (int)Math.Ceiling(P * AutoLines * 1.002) + 64;
                 long from = _sdCount - span;
@@ -751,36 +874,50 @@ namespace Kainos.Sstv
                     int bo = 0;
                     for (int o = 1; o < per; o++) if (tot[o] > tot[bo]) bo = o;
                     double sc = tot[bo] / AutoLines;
-                    if (sc < 0.5) continue;
+                    if (sc < autoScore) continue;
                     int hits = 0;
                     for (int l = 0; l < AutoLines; l++)
                     {
                         int x = (int)Math.Round(l * p) + bo;
                         if (x + inner < span && (cum[x + inner] - cum[x]) / inner > 0.5) hits++;
                     }
-                    if (hits >= 8 && (hits > bestHits || (hits == bestHits && sc > bestScore)))
+                    if (hits >= autoHits && (hits > bestHits || (hits == bestHits && sc > bestScore)))
                     {
                         best = m; bestScore = sc; bestHits = hits; bestPer = p * AutoDec; bestAt = (from + bo) * AutoDec - SyncWin;
                     }
                 }
             }
             if (best == null) return;
+            if (tryRejoin(best, bestAt)) return;
             // the first line's sync starts at bestAt (samples); start() takes where the line (Scottie: the picture) begins
             long t0 = (long)Math.Round(bestAt - best.SyncOffset * Rate - (best.Family == SstvFamily.Scottie ? best.Sync * Rate : 0));
-            start(best, t0, 0);
+            start(best, t0, 0, true);
             _period = bestPer;
             _pic.NoHeader = true;
             _hunt = false;
             Diag?.Invoke("no header: " + best.Name + " found from its line sync (" + bestHits + " of " + AutoLines + " lines), started from those lines");
         }
 
-        private void finish(bool cut)
+        private void finish(bool cut, int keep = -1)
         {
             if (_pic == null || _pic.Complete) return;
             refit(true);
-            int lines = Math.Max(_nextLine, cut ? _nextLine : _pic.Mode.RadioLines);
+            // AFC: the tuning over the whole picture (for the FSK ID, the saved tuning and Redraw)
+            if (Afc)
+            {
+                List<double> v = _lineAfc.Where(x => !double.IsNaN(x)).OrderBy(x => x).ToList();
+                if (v.Count >= 8) _shift = Math.Max(-250, Math.Min(250, v[v.Count / 2]));
+            }
+            int lines = keep >= 0 ? Math.Min(keep, _nextLine) : Math.Max(_nextLine, cut ? _nextLine : _pic.Mode.RadioLines);
             for (int l = 0; l < lines; l++) drawLine(l);
+            if (keep >= 0) clearFrom(lines);
+            _pic.FreqShift = _shift;
             _pic.Complete = true;
+            _endN = _n;
+            _scoreShift = 0;
+            PicState st = saveState();
+            st.Drawn = lines;
+            _pic.State = st;
             // the FSK ID, if any, follows the picture: look for it from just before its end for 1.5 s
             _idFrom = (long)(_t0 + _pic.Mode.RadioLines * _period - 0.05 * Rate);
             _idUntil = _idFrom + (long)(1.6 * Rate);
@@ -789,6 +926,122 @@ namespace Kainos.Sstv
             _lastEnd = _n;
             _autoHold = Math.Max(_autoHold, _n + 3L * Rate);
             if (cut) { _idFor = null; Finished?.Invoke(_pic); }
+        }
+
+        // a picture without a header whose signal has gone: ended at its last line with sync, and kept in case it comes back
+        private void fadeEnd()
+        {
+            int keep = _lastGood + 1;
+            // what was "found" in the noise after it would bend the timing fit (and a rejoin's prediction from it)
+            for (int l = keep; l < _sync.Length; l++) { _sync[l] = double.NaN; _onTrack[l] = false; }
+            Diag?.Invoke("signal gone (" + _pic.Mode.Name + "): ended at line " + keep + "; carried on if it comes back in step");
+            finish(true, keep);
+            _rejoin = _pic != null ? _pic.State as PicState : null;
+        }
+
+        // the rows after radio line `from` back to black (they were the fade or the end of the transmission)
+        private void clearFrom(int from)
+        {
+            SstvMode m = _pic.Mode;
+            int row = m.Family == SstvFamily.PD ? 2 * from : from;
+            int a = Math.Min(_pic.Rgb.Length, row * m.Width * 3);
+            Array.Clear(_pic.Rgb, a, _pic.Rgb.Length - a);
+            _pic.LinesDone = Math.Min(_pic.LinesDone, row);
+        }
+
+        // A picture found from its line sync in the same mode as one that ended when its signal went, and in step with it
+        // (its sync where that picture's line timing, carried on, puts a line): the same picture, back from a long fade.
+        // It carries on from its last good line, the gap drawn from the audio kept.
+        private bool tryRejoin(SstvMode m, long syncAt)
+        {
+            PicState rj = _rejoin;
+            if (rj == null || rj.Pic.Mode != m || _n - rj.EndN > 90L * Rate) return false;
+            double k = (syncAt - rj.Phase) / rj.Period;
+            long kr = (long)Math.Round(k);
+            // the line-rhythm search places a picture to within a few ms (seen up to 10): a rough gate, then each of those
+            // ten lines' sync looked for where the old timing puts it
+            double offMs = (k - kr) * rj.Period * 1000.0 / Rate;
+            int inStep = 0;
+            double medOff = 0;
+            if (Math.Abs(offMs) <= 15 && kr >= rj.LastGood && kr + AutoLines <= m.RadioLines) inStep = linesInStep(rj, kr, AutoLines, out medOff);
+            if (inStep < 6)
+            {
+                Diag?.Invoke("not rejoined: " + m.Name + " back " + offMs.ToString("+0.0;-0.0") + " ms from the old timing at line " + kr +
+                             " (last good " + rj.LastGood + "), " + inStep + " of " + AutoLines + " syncs in step");
+                return false;
+            }
+            _rejoin = null;
+            // the old timing, carried across the gap, is a little off at its far side: the line length was. Corrected
+            // so the returning syncs sit on it (the fit would otherwise treat them as outliers and never come round)
+            loadState(rj);
+            for (int l = 0; l <= rj.LastGood && l < _frozenAt.Length; l++)
+                if (double.IsNaN(_frozenAt[l])) { _frozenAt[l] = _phase + l * _period; _frozenPer[l] = _period; }
+            // fitted afresh from where the signal is back (the gap before it is noise: nothing in it to fit); the gap is
+            // drawn on the old timing carried on, corrected
+            _segStart = (int)kr;
+            if (kr > 0) _period += medOff / kr;
+            _nextLine = Math.Max(0, rj.LastGood + 1);
+            _lastGood = (int)kr - 1;            // the signal is back from line kr: the fade before it doesn't end it again
+            _pic.Complete = false;
+            _pic.State = null;
+            _pic.Rejoined++;
+            _hunt = false;
+            _idFor = null;
+            _visHold = _n + Rate;
+            _shiftNow = shiftAt(_nextLine);
+            _scoreShift = Afc ? Math.Max(-150, Math.Min(150, _shiftNow)) : 0;
+            Diag?.Invoke("signal back: carrying on with the " + m.Name + " picture from line " + _nextLine);
+            Resumed?.Invoke(_pic);
+            return true;
+        }
+
+        // how many of lines from..from+n-1 have a clear sync (score 0.5 or more) within 8 ms of where an ended picture's
+        // timing, carried on, puts it
+        private int linesInStep(PicState rj, long from, int n, out double medianOffset)
+        {
+            int len = (int)Math.Round(rj.Pic.Mode.Sync * Rate), inner = Math.Max(8, len - SyncWin);
+            int span = (int)(0.008 * Rate);
+            int got = 0;
+            List<int> offs = new List<int>();
+            for (long l = from; l < from + n; l++)
+            {
+                long e0 = (long)Math.Round(rj.Phase + l * rj.Period) + SyncWin;
+                double best = 0;
+                int bestO = 0;
+                for (int o = -span; o <= span; o += 4)
+                {
+                    double sum = 0;
+                    for (int j = 0; j < inner; j += 2) sum += S(e0 + o + j);
+                    double sc = sum / ((inner + 1) / 2);
+                    if (sc > best) { best = sc; bestO = o; }
+                }
+                if (best >= 0.5) { got++; offs.Add(bestO); }
+            }
+            offs.Sort();
+            medianOffset = offs.Count > 0 ? offs[offs.Count / 2] : 0;
+            return got;
+        }
+
+        // Draws a finished picture again with its slant changed by ppm (pivoting on its middle line, so the middle stays
+        // put) and its start moved by ms: for a picture the automatic fit got wrong. Needs its audio, kept for 330 s.
+        // On the decoder's thread (SstvEngine.Redraw); the picture being received, if any, is left as it was.
+        public bool Redraw(SstvPicture p, double ppm, double ms)
+        {
+            PicState s = p != null ? p.State as PicState : null;
+            if (s == null || !p.Complete || (long)s.Phase - Rate < _n - Cap) return false;
+            PicState live = _pic != null ? saveState() : null;
+            double shiftNow = _shiftNow, scoreShift = _scoreShift;
+            double[] liveCb = _cb, liveCr = _cr;
+            loadState(s);
+            double nominal = p.Mode.LineTime * Rate, d = nominal * ppm * 1e-6;
+            _period = s.Period + d;
+            _phase = s.Phase - d * (p.Mode.RadioLines / 2.0) + ms * 1e-3 * Rate;
+            for (int l = 0; l < s.Drawn; l++) drawLine(l);
+            p.SlantPpm = (_period / nominal - 1) * 1e6;
+            if (live != null) loadState(live); else _pic = null;
+            _cb = liveCb; _cr = liveCr;
+            _shiftNow = shiftNow; _scoreShift = scoreShift;
+            return true;
         }
 
         private void idFind()

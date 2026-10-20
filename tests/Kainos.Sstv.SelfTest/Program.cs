@@ -21,7 +21,7 @@ using System.Windows.Forms;
 
 namespace Kainos.Sstv.SelfTest
 {
-    internal static class Program
+    internal static partial class Program
     {
         private static int _fail;
         internal static bool Verbose;
@@ -48,6 +48,9 @@ namespace Kainos.Sstv.SelfTest
             if (args.Contains("--sweep")) { using (Bitmap tp = TestPicture()) Sweep(tp, work); return 0; }
             int wi = Array.IndexOf(args, "--wav");
             if (wi >= 0 && wi + 1 < args.Length) return DecodeWav(args[wi + 1], work);
+            if (args.Contains("--probe2")) { using (Bitmap tp = TestPicture()) Probe2(tp); return 0; }
+            if (args.Contains("--probe")) { using (Bitmap tp = TestPicture()) Probe(tp); return 0; }
+            if (args.Contains("--receive")) { using (Bitmap tp = TestPicture()) ReceiveTests(tp); Console.WriteLine(_fail == 0 ? "All passed" : _fail + " failed"); return _fail == 0 ? 0 : 1; }
             using (Bitmap test = TestPicture())
             {
                 test.Save(Path.Combine(work, "test.png"), ImageFormat.Png);
@@ -251,6 +254,9 @@ namespace Kainos.Sstv.SelfTest
                     check(started == 0, "no picture from noise alone (" + started + ")");
                 }
 
+                // 3a. the receive controls: fades, rejoining, AFC, sensitivity, modes, Redraw (ReceiveTests.cs)
+                ReceiveTests(test);
+
                 // 3b. the templates: placeholders filled, saved and read back, and drawn (looked at in the PNGs)
                 if (!args.Contains("--quick")) Templates(work);
 
@@ -301,7 +307,8 @@ namespace Kainos.Sstv.SelfTest
             return decode(q, 48000, sigma);
         }
 
-        // a picture without its header: the audio from `at` (a share of it, mid-line) on, with 20 s after; what started
+        // a picture without its header: the audio from `at` (a share of it, mid-line) on, with 35 s after (it's held
+        // 20 s after its signal goes, in case of a fade); what finished
         private static List<SstvPicture> noHeader(Bitmap test, SstvMode m, double at, double noise)
         {
             float[] a = SstvEncoder.Encode(test, m, 48000);
@@ -311,7 +318,7 @@ namespace Kainos.Sstv.SelfTest
             d.Finished += p => got.Add(p);
             if (Verbose) { d.Diag += x => Console.WriteLine("    diag: " + x); d.Started += p => Console.WriteLine("    start " + p.Mode.Name); }
             float[] buf = new float[960];
-            for (int i = 0; i < rest.Length + 48000 * 20; i += 960)
+            for (int i = 0; i < rest.Length + 48000 * 35; i += 960)
             {
                 for (int j = 0; j < 960; j++) buf[j] = (float)((i + j < rest.Length ? rest[i + j] * 0.5 : 0) + Gauss() * noise);
                 d.Push(buf, 960, 48000);
