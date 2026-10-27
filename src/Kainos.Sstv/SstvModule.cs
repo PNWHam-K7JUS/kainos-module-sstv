@@ -55,6 +55,7 @@ namespace Kainos.Sstv
         private void open()
         {
             _pane.Open();
+            _view.ShowMarkers = true;
             _engine.Listen();
             _engine.Start();
             _host.BeginInvoke(() => _view.FirstRunIfNeeded());      // the station setup, the first time
@@ -66,6 +67,7 @@ namespace Kainos.Sstv
         {
             _engine.Stop();
             _pane.Close();
+            _view.ShowMarkers = false;
             _view.ClearMarkers();
             _menu.Checked = false;
             _host.SetSetting("open", "0");

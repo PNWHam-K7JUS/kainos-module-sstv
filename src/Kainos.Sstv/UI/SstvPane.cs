@@ -649,8 +649,13 @@ namespace Kainos.Sstv.UI
             _adjust.Enabled = canAdjust;
         }
 
+        // set by the module while its window is open. The pane's timer runs for its whole life, so after closing (which
+        // clears the markers) the next tick drew sync / black / white back on the panadapter, in every mode.
+        public bool ShowMarkers { get; set; }
+
         private void markers()
         {
+            if (!ShowMarkers) return;
             bool on = _host.GetSetting("markers", "1") == "1";
             string mode = _host.Radio.Mode(_e.Rx) ?? "";
             string key = on + mode + _e.Rx;
