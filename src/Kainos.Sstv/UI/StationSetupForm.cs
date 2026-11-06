@@ -23,7 +23,7 @@ namespace Kainos.Sstv.UI
         private readonly StationProfile _st;
         private readonly TextBox _call, _name, _qth, _grid, _rig, _ant, _pwr;
         private readonly ComboBox _mode;
-        private readonly CheckBox _fsk, _replace;
+        private readonly CheckBox _fsk, _cw, _replace;
         private readonly PictureBox _preview, _photoBox;
         private readonly Label _photoNote;
         private string _photoFile;              // chosen this time (not yet copied), or null
@@ -42,7 +42,7 @@ namespace Kainos.Sstv.UI
             StartPosition = FormStartPosition.CenterParent;
             ShowInTaskbar = false;
             int s(float v) => _t.S(v);
-            ClientSize = new Size(s(820), s(470));
+            ClientSize = new Size(s(820), s(530));
             Font = _t.Font(s(12), false);
 
             Label intro = new Label
@@ -72,7 +72,10 @@ namespace Kainos.Sstv.UI
             _grid = field("Grid square", _st.Grid, null);
             _rig = field("Radio", string.IsNullOrEmpty(_st.Rig) ? "Hermes Lite 2" : _st.Rig, null);
             _ant = field("Antenna", _st.Ant, null);
-            _pwr = field("Power", _st.Pwr, "e.g. 5 W");
+            _pwr = field("Power", _st.Pwr, "Your power as written on your pictures and in the log, e.g. 5 W. It doesn't change the power: that's Kainos's Drive slider.");
+            // it's only words on the pictures (GitHub #72: it read as a power setting)
+            Controls.Add(new Label { Text = "Shown on your pictures and in the log. Kainos's Drive slider sets the power.", Location = new Point(s(16) + lw, y - s(5)), Size = new Size(fw + s(20), s(30)), ForeColor = _t.Dim, Font = _t.Font(s(10.5f), false) });
+            y += s(24);
 
             Controls.Add(new Label { Text = "CQ mode", Location = new Point(s(16), y + s(4)), Size = new Size(lw, s(20)) });
             _mode = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Location = new Point(s(16) + lw, y), Width = fw };
@@ -85,6 +88,10 @@ namespace Kainos.Sstv.UI
 
             _fsk = new CheckBox { Text = "Send my callsign after each picture (FSK ID)", Checked = _st.FskId, Location = new Point(s(16), y), AutoSize = true };
             Controls.Add(_fsk);
+            y += rh;
+            _cw = new CheckBox { Text = "Then send a CW ID (DE and my callsign in Morse, 20 WPM)", Checked = _st.CwId, Location = new Point(s(16), y), AutoSize = true };
+            new ToolTip().SetToolTip(_cw, "After each picture (and its FSK ID): \"DE " + (_st.Call.Length > 0 ? _st.Call : "your callsign") + "\" in Morse, as a 1900 Hz tone, about 4 seconds. For where an identification in CW is wanted, or just as a courtesy.");
+            Controls.Add(_cw);
             y += rh;
 
             // the photo
@@ -105,14 +112,14 @@ namespace Kainos.Sstv.UI
             _preview = new PictureBox { Location = new Point(s(392), s(84)), Size = new Size(s(412), s(330)), SizeMode = PictureBoxSizeMode.Zoom, BackColor = Color.Black };
             Controls.Add(_preview);
 
-            _replace = new CheckBox { Text = "Replace my pictures with fresh ones", Location = new Point(s(16), s(430)), AutoSize = true };
+            _replace = new CheckBox { Text = "Replace my pictures with fresh ones", Location = new Point(s(16), s(490)), AutoSize = true };
             bool have = File.Exists(TemplateStore.FileOf(host));
             _replace.Checked = !have;
             _replace.Visible = have;
             Controls.Add(_replace);
 
-            Button ok = new Button { Text = have ? "Save" : "Create my pictures", DialogResult = DialogResult.OK, Location = new Point(s(560), s(426)), Size = new Size(s(150), s(32)) };
-            Button cancel = new Button { Text = firstRun ? "Later" : "Cancel", DialogResult = DialogResult.Cancel, Location = new Point(s(718), s(426)), Size = new Size(s(86), s(32)) };
+            Button ok = new Button { Text = have ? "Save" : "Create my pictures", DialogResult = DialogResult.OK, Location = new Point(s(560), s(486)), Size = new Size(s(150), s(32)) };
+            Button cancel = new Button { Text = firstRun ? "Later" : "Cancel", DialogResult = DialogResult.Cancel, Location = new Point(s(718), s(486)), Size = new Size(s(86), s(32)) };
             Controls.Add(ok);
             Controls.Add(cancel);
             AcceptButton = ok;
@@ -165,7 +172,7 @@ namespace Kainos.Sstv.UI
             {
                 Call = _call.Text.Trim().ToUpperInvariant(), Name = _name.Text.Trim(), Qth = _qth.Text.Trim(), Grid = _grid.Text.Trim(),
                 Rig = _rig.Text.Trim(), Ant = _ant.Text.Trim(), Pwr = _pwr.Text.Trim(), Photo = _st.Photo,
-                Mode = (_mode.SelectedItem as SstvMode ?? SstvModes.ByShort("S1")).Short, FskId = _fsk.Checked, Done = true,
+                Mode = (_mode.SelectedItem as SstvMode ?? SstvModes.ByShort("S1")).Short, FskId = _fsk.Checked, CwId = _cw.Checked, Done = true,
             };
         }
 

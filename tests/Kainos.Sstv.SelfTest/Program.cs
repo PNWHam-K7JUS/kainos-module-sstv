@@ -55,6 +55,33 @@ namespace Kainos.Sstv.SelfTest
             {
                 test.Save(Path.Combine(work, "test.png"), ImageFormat.Png);
 
+                // 0. the CW ID (GitHub #72): its keying read back from the audio, at 20 WPM, on 1900 Hz
+                {
+                    float[] cw = CwId.Audio(CwId.Text("k7jus"), 48000);
+                    double dot = 1.2 / CwId.Wpm * 48000;
+                    System.Text.StringBuilder morse = new System.Text.StringBuilder();
+                    int run = 0; bool on = false;
+                    int lead = 0; while (lead < cw.Length && Math.Abs(cw[lead]) < 0.05) lead++;
+                    // the envelope: on if any sample in the last 2 ms was loud
+                    int hold = 96, since = int.MaxValue;
+                    for (int i = lead; i <= cw.Length; i++)
+                    {
+                        bool loud = i < cw.Length && Math.Abs(cw[i]) > 0.3;
+                        since = loud ? 0 : since == int.MaxValue ? since : since + 1;
+                        bool now = since < hold;
+                        if (now == on && i < cw.Length) { run++; continue; }
+                        double units = run / dot;
+                        if (on) morse.Append(units < 2 ? "." : "-");
+                        else if (units > 5) morse.Append(" / "); else if (units > 2) morse.Append(' ');
+                        on = now; run = 1;
+                    }
+                    string got = morse.ToString().Trim();
+                    check(got == "-.. . / -.- --... .--- ..- ...", "CW ID \"DE K7JUS\" keyed as " + got);
+                    check(Math.Abs((cw.Length - lead) / 48000.0 - (CwId.Elements("DE K7JUS").Sum(x => Math.Abs(x)) * 1.2 / CwId.Wpm + 0.1)) < 0.01 && lead > 0.55 * 48000, "CW ID: 20 WPM, after a " + (lead / 48000.0).ToString("0.0") + " s gap");
+                    int zc = 0; for (int i = lead + 1; i < lead + 4800; i++) if (cw[i - 1] < 0 && cw[i] >= 0) zc++;
+                    check(Math.Abs(zc - 190) <= 2, "CW ID tone 1900 Hz (" + zc * 10 + " Hz measured)");
+                }
+
                 // 1. every mode, clean
                 foreach (SstvMode m in SstvModes.All)
                 {

@@ -139,12 +139,21 @@ namespace Kainos.Sstv
 
         public double TxSecondsLeft { get { float[] w = _txWave; return w == null || _txRate <= 0 ? 0 : (w.Length - _txPos) / (double)_txRate; } }
 
-        // the audio for a picture in a mode, with the FSK ID callsign after it (null: none), at the transmit level
-        public float[] BuildTx(System.Drawing.Bitmap picture, SstvMode m, string fskId)
+        // the audio for a picture in a mode, with the FSK ID callsign after it (null: none) and then a CW ID (null: none),
+        // at the transmit level
+        public float[] BuildTx(System.Drawing.Bitmap picture, SstvMode m, string fskId, string cwId = null)
         {
             int rate = _host.Audio.TxRate;
             if (rate <= 0) rate = 48000;
             float[] a = SstvEncoder.Audio(SstvEncoder.Tones(m, SstvEncoder.Pixels(picture, m), fskId), rate);
+            if (!string.IsNullOrEmpty(cwId))
+            {
+                float[] cw = CwId.Audio(CwId.Text(cwId), rate);
+                float[] both = new float[a.Length + cw.Length];
+                Array.Copy(a, both, a.Length);
+                Array.Copy(cw, 0, both, a.Length, cw.Length);
+                a = both;
+            }
             return shape(a, rate);
         }
 

@@ -31,6 +31,7 @@ namespace Kainos.Sstv
         public string Photo = "";           // a file in the data folder, or ""
         public string Mode = "S1";          // the mode CQs go out in (SstvMode.Short)
         public bool FskId = true;           // send the callsign after each picture (MMSSTV's FSK ID)
+        public bool CwId;                   // and then "DE <callsign>" in Morse (GitHub #72)
         public bool Done;                   // the first-run setup has been through
 
         public static StationProfile Load(IKainosHost h)
@@ -40,7 +41,7 @@ namespace Kainos.Sstv
             {
                 Call = g("call", h.Callsign ?? ""), Name = g("name", ""), Qth = g("qth", ""), Grid = g("grid", h.Grid ?? ""),
                 Rig = g("rig", ""), Ant = g("ant", ""), Pwr = g("pwr", ""), Photo = g("photo", ""), Mode = g("mode", "S1"),
-                FskId = g("fskid", "1") == "1", Done = g("done", "0") == "1",
+                FskId = g("fskid", "1") == "1", CwId = g("cwid", "0") == "1", Done = g("done", "0") == "1",
             };
         }
 
@@ -49,7 +50,7 @@ namespace Kainos.Sstv
             Action<string, string> s = (k, v) => h.SetSetting("st." + k, v ?? "");
             s("call", Call.Trim().ToUpperInvariant()); s("name", Name.Trim()); s("qth", Qth.Trim()); s("grid", Grid.Trim());
             s("rig", Rig.Trim()); s("ant", Ant.Trim()); s("pwr", Pwr.Trim()); s("photo", Photo); s("mode", Mode);
-            s("fskid", FskId ? "1" : "0"); s("done", Done ? "1" : "0");
+            s("fskid", FskId ? "1" : "0"); s("cwid", CwId ? "1" : "0"); s("done", Done ? "1" : "0");
         }
 
         public string PhotoPath(IKainosHost h) { return string.IsNullOrEmpty(Photo) ? null : Path.Combine(h.DataFolder, Photo); }

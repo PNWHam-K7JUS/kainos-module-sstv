@@ -64,7 +64,7 @@ namespace Kainos.Sstv.UI
             _txMode = btn("Mode: Auto", "The mode to send in. Auto: CQs in your mode (Options > Station setup), replies and 73s in the mode the other station used");
             _send = btn("Send", "Transmit the picture shown");
             _halt = btn("Stop", "Stop transmitting now");
-            _tune = btn("Tune", "A steady 1900 Hz tone (up to 30 s) to set the transmit level: Options > Transmit level, so the radio gives full power with the ALC barely moving. Click again to stop.");
+            _tune = btn("Tune", "A steady 1900 Hz tone (up to 30 s) to set the transmit level: Options > Transmit audio level, so the ALC barely moves (the power itself is Kainos's Drive slider). Click again to stop.");
 
             _rst.Click += (s, e) => rstMenu().Show(_rst, new Point(0, _rst.Height));
             _cq.Click += (s, e) => previewKind("cq");
@@ -80,7 +80,7 @@ namespace Kainos.Sstv.UI
             {
                 if (_e.Sending) { _e.Halt(); return; }
                 string why = _e.Tune();
-                status(why ?? "Tune: 1900 Hz at " + _e.LevelDb.ToString("0") + " dB. Set Options > Transmit level for full power with the ALC barely moving.");
+                status(why ?? "Tune: 1900 Hz at " + _e.LevelDb.ToString("0") + " dB. Set Options > Transmit audio level so the ALC barely moves; Kainos's Drive slider sets the power.");
             };
             _to.TextChanged += (s, e) => { if (_pvTemplate != null && !_e.Sending) preview(_pvTemplate); };
 
@@ -185,13 +185,14 @@ namespace Kainos.Sstv.UI
             if (!_host.Radio.PowerOn) { status("The radio is off"); return; }
             StationProfile st = profile();
             string fsk = st.FskId && st.Call.Length > 0 ? st.Call : null;
+            string cw = st.CwId && st.Call.Length > 0 ? st.Call : null;
             Bitmap pic = new Bitmap(_pvBitmap);
             SstvMode m = _pvMode;
             string name = _pvTemplate.Name;
             _send.Enabled = false;
             status("Getting " + name + " ready...");
             // the audio is made off the window's thread (a long PD picture takes a moment)
-            Task.Run(() => { try { return _e.BuildTx(pic, m, fsk); } finally { pic.Dispose(); } }).ContinueWith(task =>
+            Task.Run(() => { try { return _e.BuildTx(pic, m, fsk, cw); } finally { pic.Dispose(); } }).ContinueWith(task =>
             {
                 _host.BeginInvoke(() =>
                 {
@@ -204,7 +205,7 @@ namespace Kainos.Sstv.UI
                     // the QSO starts with the first picture to (or from) them
                     string to = _to.Text.Trim();
                     if (_pvTemplate.Kind != "cq" && to.Length > 0 && !string.Equals(to, _qsoCall, StringComparison.OrdinalIgnoreCase)) { _qsoCall = to; _qsoStart = DateTime.UtcNow; }
-                    _host.Log("sending " + name + (_to.Text.Length > 0 ? " to " + _to.Text : "") + " in " + m.Name + (fsk != null ? ", FSK ID " + fsk : ""));
+                    _host.Log("sending " + name + (_to.Text.Length > 0 ? " to " + _to.Text : "") + " in " + m.Name + (fsk != null ? ", FSK ID " + fsk : "") + (cw != null ? ", CW ID" : ""));
                     status("Sending " + name + " in " + m.Name);
                     refreshSendBar();
                 });
@@ -388,12 +389,12 @@ namespace Kainos.Sstv.UI
 
         private ToolStripMenuItem levelMenu()
         {
-            ToolStripMenuItem lv = new ToolStripMenuItem("Transmit level") { ToolTipText = "Set with Tune: full power with the ALC barely moving" };
+            ToolStripMenuItem lv = new ToolStripMenuItem("Transmit audio level") { ToolTipText = "The level of the SSTV audio into the transmitter: set it with Tune so the ALC barely moves. The power itself is Kainos's Drive slider." };
             foreach (int db in new[] { 0, -3, -6, -10, -15, -20, -25, -30 })
             {
                 int d = db;
                 ToolStripMenuItem it = new ToolStripMenuItem(db + " dB") { Checked = Math.Abs(_e.LevelDb - db) < 0.5 };
-                it.Click += (s, e) => { _e.LevelDb = d; _host.SetSetting("txlevel", d.ToString(CultureInfo.InvariantCulture)); status("Transmit level " + d + " dB" + (_e.Tuning ? " (takes effect on the next Tune)" : "")); };
+                it.Click += (s, e) => { _e.LevelDb = d; _host.SetSetting("txlevel", d.ToString(CultureInfo.InvariantCulture)); status("Transmit audio level " + d + " dB" + (_e.Tuning ? " (takes effect on the next Tune)" : "")); };
                 lv.DropDownItems.Add(it);
             }
             return lv;
